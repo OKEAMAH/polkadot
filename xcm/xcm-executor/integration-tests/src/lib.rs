@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,10 +17,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg(test)]
 
-use frame_support::{codec::Encode, dispatch::GetDispatchInfo, weights::Weight};
+use codec::Encode;
+use frame_support::{dispatch::GetDispatchInfo, weights::Weight};
 use polkadot_test_client::{
-	BlockBuilderExt, ClientBlockImportExt, DefaultTestClientBuilderExt, ExecutionStrategy,
-	InitPolkadotBlockBuilder, TestClientBuilder, TestClientBuilderExt,
+	BlockBuilderExt, ClientBlockImportExt, DefaultTestClientBuilderExt, InitPolkadotBlockBuilder,
+	TestClientBuilder, TestClientBuilderExt,
 };
 use polkadot_test_runtime::{pallet_test_notifier, xcm_config::XcmConfig};
 use polkadot_test_service::construct_extrinsic;
@@ -32,9 +33,7 @@ use xcm_executor::traits::WeightBounds;
 #[test]
 fn basic_buy_fees_message_executes() {
 	sp_tracing::try_init_simple();
-	let mut client = TestClientBuilder::new()
-		.set_execution_strategy(ExecutionStrategy::AlwaysWasm)
-		.build();
+	let mut client = TestClientBuilder::new().build();
 
 	let msg = Xcm(vec![
 		WithdrawAsset((Parent, 100).into()),
@@ -65,9 +64,9 @@ fn basic_buy_fees_message_executes() {
 	client.state_at(block_hash).expect("state should exist").inspect_state(|| {
 		assert!(polkadot_test_runtime::System::events().iter().any(|r| matches!(
 			r.event,
-			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::Attempted(
-				Outcome::Complete(_)
-			)),
+			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::Attempted {
+				outcome: Outcome::Complete(_)
+			}),
 		)));
 	});
 }
@@ -75,9 +74,7 @@ fn basic_buy_fees_message_executes() {
 #[test]
 fn transact_recursion_limit_works() {
 	sp_tracing::try_init_simple();
-	let mut client = TestClientBuilder::new()
-		.set_execution_strategy(ExecutionStrategy::AlwaysWasm)
-		.build();
+	let mut client = TestClientBuilder::new().build();
 
 	let mut msg = Xcm(vec![ClearOrigin]);
 	let max_weight = <XcmConfig as xcm_executor::Config>::Weigher::weight(&mut msg).unwrap();
@@ -118,9 +115,9 @@ fn transact_recursion_limit_works() {
 	client.state_at(block_hash).expect("state should exist").inspect_state(|| {
 		assert!(polkadot_test_runtime::System::events().iter().any(|r| matches!(
 			r.event,
-			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::Attempted(
-				Outcome::Incomplete(_, XcmError::ExceedsStackLimit)
-			)),
+			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::Attempted {
+				outcome: Outcome::Incomplete(_, XcmError::ExceedsStackLimit)
+			}),
 		)));
 	});
 }
@@ -132,9 +129,7 @@ fn query_response_fires() {
 	use polkadot_test_runtime::RuntimeEvent::TestNotifier;
 
 	sp_tracing::try_init_simple();
-	let mut client = TestClientBuilder::new()
-		.set_execution_strategy(ExecutionStrategy::AlwaysWasm)
-		.build();
+	let mut client = TestClientBuilder::new().build();
 
 	let mut block_builder = client.init_polkadot_block_builder();
 
@@ -195,10 +190,10 @@ fn query_response_fires() {
 	client.state_at(block_hash).expect("state should exist").inspect_state(|| {
 		assert!(polkadot_test_runtime::System::events().iter().any(|r| matches!(
 			r.event,
-			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::ResponseReady(
-				q,
-				Response::ExecutionResult(None),
-			)) if q == query_id,
+			polkadot_test_runtime::RuntimeEvent::Xcm(pallet_xcm::Event::ResponseReady {
+				query_id: q,
+				response: Response::ExecutionResult(None),
+			}) if q == query_id,
 		)));
 		assert_eq!(
 			polkadot_test_runtime::Xcm::query(query_id),
@@ -216,9 +211,7 @@ fn query_response_elicits_handler() {
 	use polkadot_test_runtime::RuntimeEvent::TestNotifier;
 
 	sp_tracing::try_init_simple();
-	let mut client = TestClientBuilder::new()
-		.set_execution_strategy(ExecutionStrategy::AlwaysWasm)
-		.build();
+	let mut client = TestClientBuilder::new().build();
 
 	let mut block_builder = client.init_polkadot_block_builder();
 

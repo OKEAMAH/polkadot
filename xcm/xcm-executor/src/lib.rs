@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -31,8 +31,8 @@ use xcm::latest::prelude::*;
 pub mod traits;
 use traits::{
 	validate_export, AssetExchange, AssetLock, CallDispatcher, ClaimAssets, ConvertOrigin,
-	DropAssets, Enact, ExportXcm, FeeManager, FeeReason, OnResponse, ShouldExecute, TransactAsset,
-	VersionChangeNotifier, WeightBounds, WeightTrader,
+	DropAssets, Enact, ExportXcm, FeeManager, FeeReason, OnResponse, Properties, ShouldExecute,
+	TransactAsset, VersionChangeNotifier, WeightBounds, WeightTrader,
 };
 
 mod assets;
@@ -193,8 +193,8 @@ impl<Config: config::Config> ExecuteXcm<Config::RuntimeCall> for XcmExecutor<Con
 	fn execute(
 		origin: impl Into<MultiLocation>,
 		WeighedMessage(xcm_weight, mut message): WeighedMessage<Config::RuntimeCall>,
-		message_hash: XcmHash,
-		mut weight_credit: Weight,
+		id: &mut XcmHash,
+		weight_credit: Weight,
 	) -> Outcome {
 		let origin = origin.into();
 		log::trace!(
@@ -204,24 +204,27 @@ impl<Config: config::Config> ExecuteXcm<Config::RuntimeCall> for XcmExecutor<Con
 			message,
 			weight_credit,
 		);
+		let mut properties = Properties { weight_credit, message_id: None };
 		if let Err(e) = Config::Barrier::should_execute(
 			&origin,
 			message.inner_mut(),
 			xcm_weight,
-			&mut weight_credit,
+			&mut properties,
 		) {
 			log::trace!(
 				target: "xcm::execute_xcm_in_credit",
-				"Barrier blocked execution! Error: {:?}. (origin: {:?}, message: {:?}, weight_credit: {:?})",
+				"Barrier blocked execution! Error: {:?}. (origin: {:?}, message: {:?}, properties: {:?})",
 				e,
 				origin,
 				message,
-				weight_credit,
+				properties,
 			);
 			return Outcome::Error(XcmError::Barrier)
 		}
 
-		let mut vm = Self::new(origin, message_hash);
+		*id = properties.message_id.unwrap_or(*id);
+
+		let mut vm = Self::new(origin, *id);
 
 		while !message.0.is_empty() {
 			let result = vm.process(message);
@@ -272,12 +275,12 @@ impl From<ExecutorError> for frame_benchmarking::BenchmarkError {
 }
 
 impl<Config: config::Config> XcmExecutor<Config> {
-	pub fn new(origin: impl Into<MultiLocation>, message_hash: XcmHash) -> Self {
+	pub fn new(origin: impl Into<MultiLocation>, message_id: XcmHash) -> Self {
 		let origin = origin.into();
 		Self {
 			holding: Assets::new(),
 			holding_limit: Config::MaxAssetsIntoHolding::get() as usize,
-			context: XcmContext { origin: Some(origin), message_hash, topic: None },
+			context: XcmContext { origin: Some(origin), message_id, topic: None },
 			original_origin: origin,
 			trader: Config::Trader::new(),
 			error: None,
@@ -353,7 +356,8 @@ impl<Config: config::Config> XcmExecutor<Config> {
 	}
 
 	/// Execute any final operations after having executed the XCM message.
-	/// This includes refunding surplus weight, trapping extra holding funds, and returning any errors during execution.
+	/// This includes refunding surplus weight, trapping extra holding funds, and returning any
+	/// errors during execution.
 	pub fn post_process(mut self, xcm_weight: Weight) -> Outcome {
 		// We silently drop any error from our attempt to refund the surplus as it's a charitable
 		// thing so best-effort is all we will do.
@@ -454,7 +458,7 @@ impl<Config: config::Config> XcmExecutor<Config> {
 		let current_surplus = self.total_surplus.saturating_sub(self.total_refunded);
 		if current_surplus.any_gt(Weight::zero()) {
 			self.total_refunded.saturating_accrue(current_surplus);
-			if let Some(w) = self.trader.refund_weight(current_surplus) {
+			if let Some(w) = self.trader.refund_weight(current_surplus, &self.context) {
 				self.subsume_asset(w)?;
 			}
 		}
@@ -530,9 +534,10 @@ impl<Config: config::Config> XcmExecutor<Config> {
 						Config::IsTeleporter::contains(asset, &origin),
 						XcmError::UntrustedTeleportLocation
 					);
-					// We should check that the asset can actually be teleported in (for this to be in error, there
-					// would need to be an accounting violation by one of the trusted chains, so it's unlikely, but we
-					// don't want to punish a possibly innocent chain/user).
+					// We should check that the asset can actually be teleported in (for this to be
+					// in error, there would need to be an accounting violation by one of the
+					// trusted chains, so it's unlikely, but we don't want to punish a possibly
+					// innocent chain/user).
 					Config::AssetTransactor::can_check_in(&origin, asset, &self.context)?;
 				}
 				for asset in assets.into_inner().into_iter() {
@@ -600,8 +605,8 @@ impl<Config: config::Config> XcmExecutor<Config> {
 				Ok(())
 			},
 			ReportError(response_info) => {
-				// Report the given result by sending a QueryResponse XCM to a previously given outcome
-				// destination if one was registered.
+				// Report the given result by sending a QueryResponse XCM to a previously given
+				// outcome destination if one was registered.
 				self.respond(
 					self.cloned_origin(),
 					Response::ExecutionResult(self.error),
@@ -686,7 +691,7 @@ impl<Config: config::Config> XcmExecutor<Config> {
 					// pay for `weight` using up to `fees` of the holding register.
 					let max_fee =
 						self.holding.try_take(fees.into()).map_err(|_| XcmError::NotHoldingFees)?;
-					let unspent = self.trader.buy_weight(weight, max_fee)?;
+					let unspent = self.trader.buy_weight(weight, max_fee, &self.context)?;
 					self.subsume_assets(unspent)?;
 				}
 				Ok(())
@@ -773,7 +778,8 @@ impl<Config: config::Config> XcmExecutor<Config> {
 					})
 					.collect::<Result<Vec<_>, XcmError>>()?;
 				let QueryResponseInfo { destination, query_id, max_weight } = response_info;
-				let response = Response::PalletsInfo(pallets.try_into()?);
+				let response =
+					Response::PalletsInfo(pallets.try_into().map_err(|_| XcmError::Overflow)?);
 				let querier = Self::to_querier(self.cloned_origin(), &destination)?;
 				let instruction = QueryResponse { query_id, response, max_weight, querier };
 				let message = Xcm(vec![instruction]);
@@ -819,10 +825,12 @@ impl<Config: config::Config> XcmExecutor<Config> {
 				Ok(())
 			},
 			ExportMessage { network, destination, xcm } => {
-				// The actual message send to the bridge for forwarding is prepended with `UniversalOrigin`
-				// and `DescendOrigin` in order to ensure that the message is executed with this Origin.
+				// The actual message sent to the bridge for forwarding is prepended with
+				// `UniversalOrigin` and `DescendOrigin` in order to ensure that the message is
+				// executed with this Origin.
 				//
-				// Prepend the desired message with instructions which effectively rewrite the origin.
+				// Prepend the desired message with instructions which effectively rewrite the
+				// origin.
 				//
 				// This only works because the remote chain empowers the bridge
 				// to speak for the local network.
@@ -872,9 +880,11 @@ impl<Config: config::Config> XcmExecutor<Config> {
 			RequestUnlock { asset, locker } => {
 				let origin = *self.origin_ref().ok_or(XcmError::BadOrigin)?;
 				let remote_asset = Self::try_reanchor(asset.clone(), &locker)?.0;
+				let remote_target = Self::try_reanchor_multilocation(origin, &locker)?.0;
 				let reduce_ticket =
 					Config::AssetLocker::prepare_reduce_unlockable(locker, asset, origin)?;
-				let msg = Xcm::<()>(vec![UnlockAsset { asset: remote_asset, target: origin }]);
+				let msg =
+					Xcm::<()>(vec![UnlockAsset { asset: remote_asset, target: remote_target }]);
 				let (ticket, price) = validate_send::<Config::XcmSender>(locker, msg)?;
 				self.take_fee(price, FeeReason::RequestUnlock)?;
 				reduce_ticket.enact()?;
@@ -908,7 +918,15 @@ impl<Config: config::Config> XcmExecutor<Config> {
 				self.context.topic = None;
 				Ok(())
 			},
-			AliasOrigin(_) => Err(XcmError::NoPermission),
+			AliasOrigin(target) => {
+				let origin = self.origin_ref().ok_or(XcmError::BadOrigin)?;
+				if Config::Aliasers::contains(origin, &target) {
+					self.context.origin = Some(target);
+					Ok(())
+				} else {
+					Err(XcmError::NoPermission)
+				}
+			},
 			UnpaidExecution { check_origin, .. } => {
 				ensure!(
 					check_origin.is_none() || self.context.origin == check_origin,
@@ -984,6 +1002,17 @@ impl<Config: config::Config> XcmExecutor<Config> {
 			.reanchored(&destination, reanchor_context)
 			.map_err(|()| XcmError::ReanchorFailed)?;
 		Ok((asset, reanchor_context))
+	}
+
+	fn try_reanchor_multilocation(
+		location: MultiLocation,
+		destination: &MultiLocation,
+	) -> Result<(MultiLocation, InteriorMultiLocation), XcmError> {
+		let reanchor_context = Config::UniversalLocation::get();
+		let location = location
+			.reanchored(&destination, reanchor_context)
+			.map_err(|_| XcmError::ReanchorFailed)?;
+		Ok((location, reanchor_context))
 	}
 
 	/// NOTE: Any assets which were unable to be reanchored are introduced into `failed_bin`.

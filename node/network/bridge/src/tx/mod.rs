@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -20,18 +20,20 @@ use super::*;
 use polkadot_node_network_protocol::{
 	peer_set::{CollationVersion, PeerSet, PeerSetProtocolNames, ValidationVersion},
 	request_response::ReqProtocolNames,
-	v1 as protocol_v1, PeerId, Versioned,
+	v1 as protocol_v1, vstaging as protocol_vstaging, PeerId, Versioned,
 };
 
 use polkadot_node_subsystem::{
-	errors::SubsystemError, messages::NetworkBridgeTxMessage, overseer, FromOrchestra,
-	OverseerSignal, SpawnedSubsystem,
+	errors::SubsystemError,
+	messages::{NetworkBridgeTxMessage, ReportPeerMessage},
+	overseer, FromOrchestra, OverseerSignal, SpawnedSubsystem,
 };
 
 /// Peer set info for network initialization.
 ///
-/// To be added to [`NetworkConfiguration::extra_sets`].
+/// To be passed to [`FullNetworkConfiguration::add_notification_protocol`]().
 pub use polkadot_node_network_protocol::peer_set::{peer_sets_info, IsAuthority};
+use sc_network::ReputationChange;
 
 use crate::validator_discovery;
 
@@ -59,7 +61,8 @@ pub struct NetworkBridgeTx<N, AD> {
 }
 
 impl<N, AD> NetworkBridgeTx<N, AD> {
-	/// Create a new network bridge subsystem with underlying network service and authority discovery service.
+	/// Create a new network bridge subsystem with underlying network service and authority
+	/// discovery service.
 	///
 	/// This assumes that the network service has had the notifications protocol for the network
 	/// bridge already registered. See [`peers_sets_info`](peers_sets_info).
@@ -148,13 +151,24 @@ where
 	AD: validator_discovery::AuthorityDiscovery + Clone,
 {
 	match msg {
-		NetworkBridgeTxMessage::ReportPeer(peer, rep) => {
-			if !rep.is_benefit() {
+		NetworkBridgeTxMessage::ReportPeer(ReportPeerMessage::Single(peer, rep)) => {
+			if !rep.value.is_positive() {
 				gum::debug!(target: LOG_TARGET, ?peer, ?rep, action = "ReportPeer");
 			}
 
 			metrics.on_report_event();
 			network_service.report_peer(peer, rep);
+		},
+		NetworkBridgeTxMessage::ReportPeer(ReportPeerMessage::Batch(batch)) => {
+			for (peer, score) in batch {
+				let rep = ReputationChange::new(score, "Aggregated reputation change");
+				if !rep.value.is_positive() {
+					gum::debug!(target: LOG_TARGET, ?peer, ?rep, action = "ReportPeer");
+				}
+
+				metrics.on_report_event();
+				network_service.report_peer(peer, rep);
+			}
 		},
 		NetworkBridgeTxMessage::DisconnectPeer(peer, peer_set) => {
 			gum::trace!(
@@ -183,6 +197,13 @@ where
 					WireMessage::ProtocolMessage(msg),
 					&metrics,
 				),
+				Versioned::VStaging(msg) => send_validation_message_vstaging(
+					&mut network_service,
+					peers,
+					peerset_protocol_names,
+					WireMessage::ProtocolMessage(msg),
+					&metrics,
+				),
 			}
 		},
 		NetworkBridgeTxMessage::SendValidationMessages(msgs) => {
@@ -195,6 +216,13 @@ where
 			for (peers, msg) in msgs {
 				match msg {
 					Versioned::V1(msg) => send_validation_message_v1(
+						&mut network_service,
+						peers,
+						peerset_protocol_names,
+						WireMessage::ProtocolMessage(msg),
+						&metrics,
+					),
+					Versioned::VStaging(msg) => send_validation_message_vstaging(
 						&mut network_service,
 						peers,
 						peerset_protocol_names,
@@ -219,6 +247,13 @@ where
 					WireMessage::ProtocolMessage(msg),
 					&metrics,
 				),
+				Versioned::VStaging(msg) => send_collation_message_vstaging(
+					&mut network_service,
+					peers,
+					peerset_protocol_names,
+					WireMessage::ProtocolMessage(msg),
+					&metrics,
+				),
 			}
 		},
 		NetworkBridgeTxMessage::SendCollationMessages(msgs) => {
@@ -231,6 +266,13 @@ where
 			for (peers, msg) in msgs {
 				match msg {
 					Versioned::V1(msg) => send_collation_message_v1(
+						&mut network_service,
+						peers,
+						peerset_protocol_names,
+						WireMessage::ProtocolMessage(msg),
+						&metrics,
+					),
+					Versioned::VStaging(msg) => send_collation_message_vstaging(
 						&mut network_service,
 						peers,
 						peerset_protocol_names,
@@ -362,6 +404,42 @@ fn send_collation_message_v1(
 		peers,
 		PeerSet::Collation,
 		CollationVersion::V1.into(),
+		protocol_names,
+		message,
+		metrics,
+	);
+}
+
+fn send_validation_message_vstaging(
+	net: &mut impl Network,
+	peers: Vec<PeerId>,
+	protocol_names: &PeerSetProtocolNames,
+	message: WireMessage<protocol_vstaging::ValidationProtocol>,
+	metrics: &Metrics,
+) {
+	send_message(
+		net,
+		peers,
+		PeerSet::Validation,
+		ValidationVersion::VStaging.into(),
+		protocol_names,
+		message,
+		metrics,
+	);
+}
+
+fn send_collation_message_vstaging(
+	net: &mut impl Network,
+	peers: Vec<PeerId>,
+	protocol_names: &PeerSetProtocolNames,
+	message: WireMessage<protocol_vstaging::CollationProtocol>,
+	metrics: &Metrics,
+) {
+	send_message(
+		net,
+		peers,
+		PeerSet::Collation,
+		CollationVersion::VStaging.into(),
 		protocol_names,
 		message,
 		metrics,

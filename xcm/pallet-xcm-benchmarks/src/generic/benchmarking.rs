@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@ use frame_benchmarking::{benchmarks, BenchmarkError};
 use frame_support::dispatch::GetDispatchInfo;
 use sp_std::vec;
 use xcm::{
-	latest::{prelude::*, MaybeErrorCode, Weight},
+	latest::{prelude::*, MaxDispatchErrorLen, MaybeErrorCode, Weight},
 	DoubleEncoded,
 };
 use xcm_executor::{ExecutorError, FeesMode};
@@ -209,7 +209,7 @@ benchmarks! {
 			assets.clone().into(),
 			&XcmContext {
 				origin: Some(origin.clone()),
-				message_hash: [0; 32],
+				message_id: [0; 32],
 				topic: None,
 			},
 		);
@@ -266,7 +266,7 @@ benchmarks! {
 			max_response_weight,
 			&XcmContext {
 				origin: Some(origin.clone()),
-				message_hash: [0; 32],
+				message_id: [0; 32],
 				topic: None,
 			},
 		).map_err(|_| "Could not start subscription")?;
@@ -279,21 +279,6 @@ benchmarks! {
 		executor.bench_process(xcm)?;
 	} verify {
 		assert!(!<T::XcmConfig as xcm_executor::Config>::SubscriptionService::is_subscribed(&origin));
-	}
-
-	initiate_reserve_withdraw {
-		let holding = T::worst_case_holding(1);
-		let assets_filter = MultiAssetFilter::Definite(holding.clone());
-		let reserve = T::valid_destination().map_err(|_| BenchmarkError::Skip)?;
-		let mut executor = new_executor::<T>(Default::default());
-		executor.set_holding(holding.into());
-		let instruction = Instruction::InitiateReserveWithdraw { assets: assets_filter, reserve, xcm: Xcm(vec![]) };
-		let xcm = Xcm(vec![instruction]);
-	}: {
-		executor.bench_process(xcm)?;
-	} verify {
-		// The execute completing successfully is as good as we can check.
-		// TODO: Potentially add new trait to XcmSender to detect a queued outgoing message. #4426
 	}
 
 	burn_asset {
@@ -360,9 +345,9 @@ benchmarks! {
 
 	expect_transact_status {
 		let mut executor = new_executor::<T>(Default::default());
-		// 1024 is an overestimate but should be good enough until we have `max_encoded_len`.
-		// Eventually it should be replaced by `DispatchError::max_encoded_len()`.
-		let worst_error = || MaybeErrorCode::Error(vec![0; 1024]);
+		let worst_error = || -> MaybeErrorCode {
+			vec![0; MaxDispatchErrorLen::get() as usize].into()
+		};
 		executor.set_transact_status(worst_error());
 
 		let instruction = Instruction::ExpectTransactStatus(worst_error());
@@ -430,7 +415,7 @@ benchmarks! {
 
 	clear_transact_status {
 		let mut executor = new_executor::<T>(Default::default());
-		executor.set_transact_status(MaybeErrorCode::Error(b"MyError".to_vec()));
+		executor.set_transact_status(b"MyError".to_vec().into());
 
 		let instruction = Instruction::ClearTransactStatus;
 		let xcm = Xcm(vec![instruction]);
@@ -482,9 +467,9 @@ benchmarks! {
 	}
 
 	universal_origin {
-		let alias = T::universal_alias().map_err(|_| BenchmarkError::Skip)?;
+		let (origin, alias) = T::universal_alias().map_err(|_| BenchmarkError::Skip)?;
 
-		let mut executor = new_executor::<T>(Here.into_location());
+		let mut executor = new_executor::<T>(origin);
 
 		let instruction = Instruction::UniversalOrigin(alias.clone());
 		let xcm = Xcm(vec![instruction]);
@@ -494,6 +479,27 @@ benchmarks! {
 		use frame_support::traits::Get;
 		let universal_location = <T::XcmConfig as xcm_executor::Config>::UniversalLocation::get();
 		assert_eq!(executor.origin(), &Some(X1(alias).relative_to(&universal_location)));
+	}
+
+	export_message {
+		let x in 1 .. 1000;
+		// The `inner_xcm` influences `ExportMessage` total weight based on
+		// `inner_xcm.encoded_size()`, so for this benchmark use smallest encoded instruction
+		// to approximate weight per "unit" of encoded size; then actual weight can be estimated
+		// to be `inner_xcm.encoded_size() * benchmarked_unit`.
+		// Use `ClearOrigin` as the small encoded instruction.
+		let inner_xcm = Xcm(vec![ClearOrigin; x as usize]);
+		// Get `origin`, `network` and `destination` from configured runtime.
+		let (origin, network, destination) = T::export_message_origin_and_destination()?;
+		let mut executor = new_executor::<T>(origin);
+		let xcm = Xcm(vec![ExportMessage {
+			network, destination, xcm: inner_xcm,
+		}]);
+	}: {
+		executor.bench_process(xcm)?;
+	} verify {
+		// The execute completing successfully is as good as we can check.
+		// TODO: Potentially add new trait to XcmSender to detect a queued outgoing message. #4426
 	}
 
 	set_fees_mode {
@@ -611,6 +617,19 @@ benchmarks! {
 		let xcm = Xcm(vec![instruction]);
 	}: {
 		executor.bench_process(xcm)?;
+	}
+
+	alias_origin {
+		let (origin, target) = T::alias_origin().map_err(|_| BenchmarkError::Skip)?;
+
+		let mut executor = new_executor::<T>(origin);
+
+		let instruction = Instruction::AliasOrigin(target.clone());
+		let xcm = Xcm(vec![instruction]);
+	}: {
+		executor.bench_process(xcm)?;
+	} verify {
+		assert_eq!(executor.origin(), &Some(target));
 	}
 
 	impl_benchmark_test_suite!(

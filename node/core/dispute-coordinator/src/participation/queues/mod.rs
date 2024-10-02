@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -14,7 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+	cmp::Ordering,
+	collections::{btree_map::Entry, BTreeMap},
+};
 
 use futures::channel::oneshot;
 use polkadot_node_subsystem::{messages::ChainApiMessage, overseer};
@@ -24,6 +27,9 @@ use crate::{
 	error::{FatalError, FatalResult, Result},
 	LOG_TARGET,
 };
+
+use crate::metrics::Metrics;
+use polkadot_node_subsystem_util::metrics::prometheus::prometheus;
 
 #[cfg(test)]
 mod tests;
@@ -56,14 +62,18 @@ pub struct Queues {
 
 	/// Priority queue.
 	priority: BTreeMap<CandidateComparator, ParticipationRequest>,
+
+	/// Handle for recording queues data in metrics
+	metrics: Metrics,
 }
 
 /// A dispute participation request that can be queued.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug)]
 pub struct ParticipationRequest {
 	candidate_hash: CandidateHash,
 	candidate_receipt: CandidateReceipt,
 	session: SessionIndex,
+	request_timer: Option<prometheus::HistogramTimer>, // Sends metric data when request is dropped
 }
 
 /// Whether a `ParticipationRequest` should be put on best-effort or the priority queue.
@@ -107,8 +117,12 @@ pub enum QueueError {
 
 impl ParticipationRequest {
 	/// Create a new `ParticipationRequest` to be queued.
-	pub fn new(candidate_receipt: CandidateReceipt, session: SessionIndex) -> Self {
-		Self { candidate_hash: candidate_receipt.hash(), candidate_receipt, session }
+	pub fn new(
+		candidate_receipt: CandidateReceipt,
+		session: SessionIndex,
+		request_timer: Option<prometheus::HistogramTimer>,
+	) -> Self {
+		Self { candidate_hash: candidate_receipt.hash(), candidate_receipt, session, request_timer }
 	}
 
 	pub fn candidate_receipt(&'_ self) -> &'_ CandidateReceipt {
@@ -120,16 +134,36 @@ impl ParticipationRequest {
 	pub fn session(&self) -> SessionIndex {
 		self.session
 	}
+	pub fn discard_timer(&mut self) {
+		if let Some(timer) = self.request_timer.take() {
+			timer.stop_and_discard();
+		}
+	}
 	pub fn into_candidate_info(self) -> (CandidateHash, CandidateReceipt) {
 		let Self { candidate_hash, candidate_receipt, .. } = self;
 		(candidate_hash, candidate_receipt)
 	}
 }
 
+// We want to compare and clone participation requests in unit tests, so we
+// only implement Eq and Clone for tests.
+#[cfg(test)]
+impl PartialEq for ParticipationRequest {
+	fn eq(&self, other: &Self) -> bool {
+		let ParticipationRequest { candidate_receipt, candidate_hash, session, request_timer: _ } =
+			self;
+		candidate_receipt == other.candidate_receipt() &&
+			candidate_hash == other.candidate_hash() &&
+			*session == other.session()
+	}
+}
+#[cfg(test)]
+impl Eq for ParticipationRequest {}
+
 impl Queues {
 	/// Create new `Queues`.
-	pub fn new() -> Self {
-		Self { best_effort: BTreeMap::new(), priority: BTreeMap::new() }
+	pub fn new(metrics: Metrics) -> Self {
+		Self { best_effort: BTreeMap::new(), priority: BTreeMap::new(), metrics }
 	}
 
 	/// Will put message in queue, either priority or best effort depending on priority.
@@ -154,9 +188,14 @@ impl Queues {
 	/// First the priority queue is considered and then the best effort one.
 	pub fn dequeue(&mut self) -> Option<ParticipationRequest> {
 		if let Some(req) = self.pop_priority() {
+			self.metrics.report_priority_queue_size(self.priority.len() as u64);
 			return Some(req.1)
 		}
-		self.pop_best_effort().map(|d| d.1)
+		if let Some(req) = self.pop_best_effort() {
+			self.metrics.report_best_effort_queue_size(self.best_effort.len() as u64);
+			return Some(req.1)
+		}
+		None
 	}
 
 	/// Reprioritizes any participation requests pertaining to the
@@ -180,23 +219,50 @@ impl Queues {
 		}
 		if let Some(request) = self.best_effort.remove(&comparator) {
 			self.priority.insert(comparator, request);
+			// Report changes to both queue sizes
+			self.metrics.report_priority_queue_size(self.priority.len() as u64);
+			self.metrics.report_best_effort_queue_size(self.best_effort.len() as u64);
 		}
 		Ok(())
 	}
 
+	/// Will put message in queue, either priority or best effort depending on priority.
+	///
+	/// If the message was already previously present on best effort, it will be moved to priority
+	/// if it is considered priority now.
+	///
+	/// Returns error in case a queue was found full already.
+	///
+	///  # Request timers
+	///
+	/// [`ParticipationRequest`]s contain request timers.
+	/// Where an old request would be replaced by a new one, we keep the old request.
+	/// This prevents request timers from resetting on each new request.
 	fn queue_with_comparator(
 		&mut self,
 		comparator: CandidateComparator,
 		priority: ParticipationPriority,
-		req: ParticipationRequest,
+		mut req: ParticipationRequest,
 	) -> std::result::Result<(), QueueError> {
 		if priority.is_priority() {
 			if self.priority.len() >= PRIORITY_QUEUE_SIZE {
 				return Err(QueueError::PriorityFull)
 			}
-			// Remove any best effort entry:
-			self.best_effort.remove(&comparator);
-			self.priority.insert(comparator, req);
+			// Remove any best effort entry, using it to replace our new
+			// request.
+			if let Some(older_request) = self.best_effort.remove(&comparator) {
+				req.discard_timer();
+				req = older_request;
+			}
+			// Keeping old request if any.
+			match self.priority.entry(comparator) {
+				Entry::Occupied(_) => req.discard_timer(),
+				Entry::Vacant(vac) => {
+					vac.insert(req);
+				},
+			}
+			self.metrics.report_priority_queue_size(self.priority.len() as u64);
+			self.metrics.report_best_effort_queue_size(self.best_effort.len() as u64);
 		} else {
 			if self.priority.contains_key(&comparator) {
 				// The candidate is already in priority queue - don't
@@ -206,7 +272,14 @@ impl Queues {
 			if self.best_effort.len() >= BEST_EFFORT_QUEUE_SIZE {
 				return Err(QueueError::BestEffortFull)
 			}
-			self.best_effort.insert(comparator, req);
+			// Keeping old request if any.
+			match self.best_effort.entry(comparator) {
+				Entry::Occupied(_) => req.discard_timer(),
+				Entry::Vacant(vac) => {
+					vac.insert(req);
+				},
+			}
+			self.metrics.report_best_effort_queue_size(self.best_effort.len() as u64);
 		}
 		Ok(())
 	}
@@ -221,8 +294,8 @@ impl Queues {
 		return Self::pop_impl(&mut self.priority)
 	}
 
-	// `pop_best_effort` and `pop_priority` do the same but on different `BTreeMap`s. This function has
-	// the extracted implementation
+	// `pop_best_effort` and `pop_priority` do the same but on different `BTreeMap`s. This function
+	// has the extracted implementation
 	fn pop_impl(
 		target: &mut BTreeMap<CandidateComparator, ParticipationRequest>,
 	) -> Option<(CandidateComparator, ParticipationRequest)> {
@@ -258,9 +331,10 @@ impl Queues {
 #[derive(Copy, Clone)]
 #[cfg_attr(test, derive(Debug))]
 struct CandidateComparator {
-	/// Block number of the relay parent. It's wrapped in an `Option<>` because there are cases when
-	/// it can't be obtained. For example when the node is lagging behind and new leaves are received
-	/// with a slight delay. Candidates with unknown relay parent are treated with the lowest priority.
+	/// Block number of the relay parent. It's wrapped in an `Option<>` because there are cases
+	/// when it can't be obtained. For example when the node is lagging behind and new leaves are
+	/// received with a slight delay. Candidates with unknown relay parent are treated with the
+	/// lowest priority.
 	///
 	/// The order enforced by `CandidateComparator` is important because we want to participate in
 	/// the oldest disputes first.
@@ -273,9 +347,10 @@ struct CandidateComparator {
 	/// that is not stable. If a new fork appears after the fact, we would start ordering the same
 	/// candidate differently, which would result in the same candidate getting queued twice.
 	relay_parent_block_number: Option<BlockNumber>,
-	/// By adding the `CandidateHash`, we can guarantee a unique ordering across candidates with the
-	/// same relay parent block number. Candidates without `relay_parent_block_number` are ordered by
-	/// the `candidate_hash` (and treated with the lowest priority, as already mentioned).
+	/// By adding the `CandidateHash`, we can guarantee a unique ordering across candidates with
+	/// the same relay parent block number. Candidates without `relay_parent_block_number` are
+	/// ordered by the `candidate_hash` (and treated with the lowest priority, as already
+	/// mentioned).
 	candidate_hash: CandidateHash,
 }
 
@@ -291,11 +366,11 @@ impl CandidateComparator {
 	/// Create a candidate comparator for a given candidate.
 	///
 	/// Returns:
-	///	- `Ok(CandidateComparator{Some(relay_parent_block_number), candidate_hash})` when the
+	/// 	- `Ok(CandidateComparator{Some(relay_parent_block_number), candidate_hash})` when the
 	/// 	relay parent can be obtained. This is the happy case.
 	/// - `Ok(CandidateComparator{None, candidate_hash})` in case the candidate's relay parent
 	/// 	can't be obtained.
-	///	- `FatalError` in case the chain API call fails with an unexpected error.
+	/// 	- `FatalError` in case the chain API call fails with an unexpected error.
 	pub async fn new(
 		sender: &mut impl overseer::DisputeCoordinatorSenderTrait,
 		candidate: &CandidateReceipt,

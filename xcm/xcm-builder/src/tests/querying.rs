@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -41,7 +41,7 @@ fn pallet_query_should_work() {
 	let expected_msg = Xcm::<()>(vec![QueryResponse {
 		query_id: 1,
 		max_weight: Weight::from_parts(50, 50),
-		response: Response::PalletsInfo(vec![].try_into().unwrap()),
+		response: Response::PalletsInfo(Default::default()),
 		querier: Some(Here.into()),
 	}]);
 	let expected_hash = fake_message_hash(&expected_msg);
@@ -95,7 +95,8 @@ fn pallet_query_with_results_should_work() {
 #[test]
 fn prepaid_result_of_query_should_get_free_execution() {
 	let query_id = 33;
-	// We put this in manually here, but normally this would be done at the point of crafting the message.
+	// We put this in manually here, but normally this would be done at the point of crafting the
+	// message.
 	expect_response(query_id, Parent.into());
 
 	let the_response = Response::Assets((Parent, 100u128).into());

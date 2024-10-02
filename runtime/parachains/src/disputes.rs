@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,11 +16,14 @@
 
 //! Runtime component for handling disputes of parachain candidates.
 
-use crate::{configuration, initializer::SessionChangeNotification, session_info};
+use crate::{
+	configuration, initializer::SessionChangeNotification, metrics::METRICS, session_info,
+};
 use bitvec::{bitvec, order::Lsb0 as BitOrderLsb0};
-use frame_support::{ensure, traits::Get, weights::Weight};
+use frame_support::{ensure, weights::Weight};
 use frame_system::pallet_prelude::*;
 use parity_scale_codec::{Decode, Encode};
+use polkadot_runtime_metrics::get_current_time;
 use primitives::{
 	byzantine_threshold, supermajority_threshold, ApprovalVote, CandidateHash,
 	CheckedDisputeStatementSet, CheckedMultiDisputeStatementSet, CompactStatement, ConsensusLog,
@@ -133,19 +136,6 @@ impl<BlockNumber> SlashingHandler<BlockNumber> for () {
 	fn initializer_on_new_session(_: SessionIndex) {}
 }
 
-/// Binary discriminator to determine if the expensive signature
-/// checks are necessary.
-#[derive(Clone, Copy)]
-pub enum VerifyDisputeSignatures {
-	/// Yes, verify the signatures.
-	Yes,
-	/// No, skip the signature verification.
-	///
-	/// Only done if there exists an invariant that
-	/// can guaranteed the signature was checked before.
-	Skip,
-}
-
 /// Provide a `Ordering` for the two provided dispute statement sets according to the
 /// following prioritization:
 ///  1. Prioritize local disputes over remote disputes
@@ -181,36 +171,6 @@ where
 	}
 }
 
-use super::paras_inherent::IsSortedBy;
-
-/// Returns `true` if duplicate items were found, otherwise `false`.
-///
-/// `check_equal(a: &T, b: &T)` _must_ return `true`, iff `a` and `b` are equal, otherwise `false.
-/// The definition of _equal_ is to be defined by the user.
-///
-/// Attention: Requires the input `iter` to be sorted, such that _equals_
-/// would be adjacent in respect whatever `check_equal` defines as equality!
-fn contains_duplicates_in_sorted_iter<
-	'a,
-	T: 'a,
-	I: 'a + IntoIterator<Item = &'a T>,
-	C: 'static + FnMut(&T, &T) -> bool,
->(
-	iter: I,
-	mut check_equal: C,
-) -> bool {
-	let mut iter = iter.into_iter();
-	if let Some(mut previous) = iter.next() {
-		while let Some(current) = iter.next() {
-			if check_equal(previous, current) {
-				return true
-			}
-			previous = current;
-		}
-	}
-	return false
-}
-
 /// Hook into disputes handling.
 ///
 /// Allows decoupling parachains handling from disputes so that it can
@@ -219,23 +179,6 @@ pub trait DisputesHandler<BlockNumber: Ord> {
 	/// Whether the chain is frozen, if the chain is frozen it will not accept
 	/// any new parachain blocks for backing or inclusion.
 	fn is_frozen() -> bool;
-
-	/// Assure sanity
-	fn assure_deduplicated_and_sorted(statement_sets: &MultiDisputeStatementSet) -> Result<(), ()> {
-		if !IsSortedBy::is_sorted_by(
-			statement_sets.as_slice(),
-			dispute_ordering_compare::<Self, BlockNumber>,
-		) {
-			return Err(())
-		}
-		// Sorted, so according to session and candidate hash, this will detect duplicates.
-		if contains_duplicates_in_sorted_iter(statement_sets, |previous, current| {
-			current.session == previous.session && current.candidate_hash == previous.candidate_hash
-		}) {
-			return Err(())
-		}
-		Ok(())
-	}
 
 	/// Remove dispute statement duplicates and sort the non-duplicates based on
 	/// local (lower indicies) vs remotes (higher indices) and age (older with lower indices).
@@ -271,13 +214,12 @@ pub trait DisputesHandler<BlockNumber: Ord> {
 	fn filter_dispute_data(
 		statement_set: DisputeStatementSet,
 		post_conclusion_acceptance_period: BlockNumber,
-		verify_sigs: VerifyDisputeSignatures,
 	) -> Option<CheckedDisputeStatementSet>;
 
 	/// Handle sets of dispute statements corresponding to 0 or more candidates.
 	/// Returns a vector of freshly created disputes.
 	fn process_checked_multi_dispute_data(
-		statement_sets: CheckedMultiDisputeStatementSet,
+		statement_sets: &CheckedMultiDisputeStatementSet,
 	) -> Result<Vec<(SessionIndex, CandidateHash)>, DispatchError>;
 
 	/// Note that the given candidate has been included.
@@ -319,13 +261,12 @@ impl<BlockNumber: Ord> DisputesHandler<BlockNumber> for () {
 	fn filter_dispute_data(
 		_set: DisputeStatementSet,
 		_post_conclusion_acceptance_period: BlockNumber,
-		_verify_sigs: VerifyDisputeSignatures,
 	) -> Option<CheckedDisputeStatementSet> {
 		None
 	}
 
 	fn process_checked_multi_dispute_data(
-		_statement_sets: CheckedMultiDisputeStatementSet,
+		_statement_sets: &CheckedMultiDisputeStatementSet,
 	) -> Result<Vec<(SessionIndex, CandidateHash)>, DispatchError> {
 		Ok(Vec::new())
 	}
@@ -357,9 +298,9 @@ impl<BlockNumber: Ord> DisputesHandler<BlockNumber> for () {
 	fn initializer_on_new_session(_notification: &SessionChangeNotification<BlockNumber>) {}
 }
 
-impl<T: Config> DisputesHandler<T::BlockNumber> for pallet::Pallet<T>
+impl<T: Config> DisputesHandler<BlockNumberFor<T>> for pallet::Pallet<T>
 where
-	T::BlockNumber: Ord,
+	BlockNumberFor<T>: Ord,
 {
 	fn is_frozen() -> bool {
 		pallet::Pallet::<T>::is_frozen()
@@ -367,19 +308,14 @@ where
 
 	fn filter_dispute_data(
 		set: DisputeStatementSet,
-		post_conclusion_acceptance_period: T::BlockNumber,
-		verify_sigs: VerifyDisputeSignatures,
+		post_conclusion_acceptance_period: BlockNumberFor<T>,
 	) -> Option<CheckedDisputeStatementSet> {
-		pallet::Pallet::<T>::filter_dispute_data(
-			&set,
-			post_conclusion_acceptance_period,
-			verify_sigs,
-		)
-		.filter_statement_set(set)
+		pallet::Pallet::<T>::filter_dispute_data(&set, post_conclusion_acceptance_period)
+			.filter_statement_set(set)
 	}
 
 	fn process_checked_multi_dispute_data(
-		statement_sets: CheckedMultiDisputeStatementSet,
+		statement_sets: &CheckedMultiDisputeStatementSet,
 	) -> Result<Vec<(SessionIndex, CandidateHash)>, DispatchError> {
 		pallet::Pallet::<T>::process_checked_multi_dispute_data(statement_sets)
 	}
@@ -387,7 +323,7 @@ where
 	fn note_included(
 		session: SessionIndex,
 		candidate_hash: CandidateHash,
-		included_in: T::BlockNumber,
+		included_in: BlockNumberFor<T>,
 	) {
 		pallet::Pallet::<T>::note_included(session, candidate_hash, included_in)
 	}
@@ -395,7 +331,7 @@ where
 	fn included_state(
 		session: SessionIndex,
 		candidate_hash: CandidateHash,
-	) -> Option<T::BlockNumber> {
+	) -> Option<BlockNumberFor<T>> {
 		pallet::Pallet::<T>::included_state(session, candidate_hash)
 	}
 
@@ -403,7 +339,7 @@ where
 		pallet::Pallet::<T>::concluded_invalid(session, candidate_hash)
 	}
 
-	fn initializer_initialize(now: T::BlockNumber) -> Weight {
+	fn initializer_initialize(now: BlockNumberFor<T>) -> Weight {
 		pallet::Pallet::<T>::initializer_initialize(now)
 	}
 
@@ -411,7 +347,7 @@ where
 		pallet::Pallet::<T>::initializer_finalize()
 	}
 
-	fn initializer_on_new_session(notification: &SessionChangeNotification<T::BlockNumber>) {
+	fn initializer_on_new_session(notification: &SessionChangeNotification<BlockNumberFor<T>>) {
 		pallet::Pallet::<T>::initializer_on_new_session(notification)
 	}
 }
@@ -437,14 +373,18 @@ pub mod pallet {
 	pub trait Config: frame_system::Config + configuration::Config + session_info::Config {
 		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 		type RewardValidators: RewardValidators;
-		type SlashingHandler: SlashingHandler<Self::BlockNumber>;
+		type SlashingHandler: SlashingHandler<BlockNumberFor<Self>>;
 
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
 	}
 
+	/// The current storage version.
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
 	#[pallet::pallet]
 	#[pallet::without_storage_info]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	/// The last pruned session, if any. All data stored by this module
@@ -460,7 +400,7 @@ pub mod pallet {
 		SessionIndex,
 		Blake2_128Concat,
 		CandidateHash,
-		DisputeState<T::BlockNumber>,
+		DisputeState<BlockNumberFor<T>>,
 	>;
 
 	/// Backing votes stored for each dispute.
@@ -484,7 +424,7 @@ pub mod pallet {
 		SessionIndex,
 		Blake2_128Concat,
 		CandidateHash,
-		T::BlockNumber,
+		BlockNumberFor<T>,
 	>;
 
 	/// Whether the chain is frozen. Starts as `None`. When this is `Some`,
@@ -493,7 +433,7 @@ pub mod pallet {
 	/// It can only be set back to `None` by governance intervention.
 	#[pallet::storage]
 	#[pallet::getter(fn last_valid_block)]
-	pub(super) type Frozen<T: Config> = StorageValue<_, Option<T::BlockNumber>, ValueQuery>;
+	pub(super) type Frozen<T: Config> = StorageValue<_, Option<BlockNumberFor<T>>, ValueQuery>;
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub fn deposit_event)]
@@ -503,14 +443,11 @@ pub mod pallet {
 		/// A dispute has concluded for or against a candidate.
 		/// `\[para id, candidate hash, dispute result\]`
 		DisputeConcluded(CandidateHash, DisputeResult),
-		/// A dispute has timed out due to insufficient participation.
-		/// `\[para id, candidate hash\]`
-		DisputeTimedOut(CandidateHash),
 		/// A dispute has concluded with supermajority against a candidate.
 		/// Block authors should no longer build on top of this head and should
 		/// instead revert the block at the given height. This should be the
 		/// number of the child of the last known valid block in the chain.
-		Revert(T::BlockNumber),
+		Revert(BlockNumberFor<T>),
 	}
 
 	#[pallet::error]
@@ -556,6 +493,8 @@ bitflags::bitflags! {
 		const FOR_SUPERMAJORITY = 0b0010;
 		/// Is the supermajority against the validity of the block reached.
 		const AGAINST_SUPERMAJORITY = 0b0100;
+		/// Is there f+1 against the validity of the block reached
+		const AGAINST_BYZANTINE = 0b1000;
 	}
 }
 
@@ -576,6 +515,10 @@ impl DisputeStateFlags {
 
 		if state.validators_for.count_ones() >= supermajority_threshold {
 			flags |= DisputeStateFlags::FOR_SUPERMAJORITY;
+		}
+
+		if state.validators_against.count_ones() > byzantine_threshold {
+			flags |= DisputeStateFlags::AGAINST_BYZANTINE;
 		}
 
 		if state.validators_against.count_ones() >= supermajority_threshold {
@@ -911,26 +854,8 @@ impl StatementSetFilter {
 
 impl<T: Config> Pallet<T> {
 	/// Called by the initializer to initialize the disputes module.
-	pub(crate) fn initializer_initialize(now: T::BlockNumber) -> Weight {
-		let config = <configuration::Pallet<T>>::config();
-
-		let mut weight = Weight::zero();
-		for (session_index, candidate_hash, mut dispute) in <Disputes<T>>::iter() {
-			weight += T::DbWeight::get().reads_writes(1, 0);
-
-			if dispute.concluded_at.is_none() &&
-				dispute.start + config.dispute_conclusion_by_time_out_period < now
-			{
-				Self::deposit_event(Event::DisputeTimedOut(candidate_hash));
-
-				dispute.concluded_at = Some(now);
-				<Disputes<T>>::insert(session_index, candidate_hash, &dispute);
-
-				weight += T::DbWeight::get().writes(1);
-			}
-		}
-
-		weight
+	pub(crate) fn initializer_initialize(_now: BlockNumberFor<T>) -> Weight {
+		Weight::zero()
 	}
 
 	/// Called by the initializer to finalize the disputes pallet.
@@ -938,7 +863,7 @@ impl<T: Config> Pallet<T> {
 
 	/// Called by the initializer to note a new session in the disputes pallet.
 	pub(crate) fn initializer_on_new_session(
-		notification: &SessionChangeNotification<T::BlockNumber>,
+		notification: &SessionChangeNotification<BlockNumberFor<T>>,
 	) {
 		let config = <configuration::Pallet<T>>::config();
 
@@ -962,8 +887,8 @@ impl<T: Config> Pallet<T> {
 				#[allow(deprecated)]
 				<BackersOnDisputes<T>>::remove_prefix(to_prune, None);
 
-				// This is larger, and will be extracted to the `shared` pallet for more proper pruning.
-				// TODO: https://github.com/paritytech/polkadot/issues/3469
+				// This is larger, and will be extracted to the `shared` pallet for more proper
+				// pruning. TODO: https://github.com/paritytech/polkadot/issues/3469
 				#[allow(deprecated)]
 				<Included<T>>::remove_prefix(to_prune, None);
 			}
@@ -983,14 +908,14 @@ impl<T: Config> Pallet<T> {
 	/// and to fail the extrinsic on error. As invalid inherents are not allowed, the dirty state
 	/// is not committed.
 	pub(crate) fn process_checked_multi_dispute_data(
-		statement_sets: CheckedMultiDisputeStatementSet,
+		statement_sets: &CheckedMultiDisputeStatementSet,
 	) -> Result<Vec<(SessionIndex, CandidateHash)>, DispatchError> {
 		let config = <configuration::Pallet<T>>::config();
 
 		let mut fresh = Vec::with_capacity(statement_sets.len());
 		for statement_set in statement_sets {
 			let dispute_target = {
-				let statement_set: &DisputeStatementSet = statement_set.as_ref();
+				let statement_set = statement_set.as_ref();
 				(statement_set.session, statement_set.candidate_hash)
 			};
 			if Self::process_checked_dispute_data(
@@ -1012,8 +937,7 @@ impl<T: Config> Pallet<T> {
 	// Disputes without enough votes to get confirmed are also filtered out.
 	fn filter_dispute_data(
 		set: &DisputeStatementSet,
-		post_conclusion_acceptance_period: <T as frame_system::Config>::BlockNumber,
-		verify_sigs: VerifyDisputeSignatures,
+		post_conclusion_acceptance_period: BlockNumberFor<T>,
 	) -> StatementSetFilter {
 		let mut filter = StatementSetFilter::RemoveIndices(Vec::new());
 
@@ -1076,29 +1000,26 @@ impl<T: Config> Pallet<T> {
 					},
 				};
 
-				// Avoid checking signatures repeatedly.
-				if let VerifyDisputeSignatures::Yes = verify_sigs {
-					// Check signature after attempting import.
-					//
-					// Since we expect that this filter will be applied to
-					// disputes long after they're concluded, 99% of the time,
-					// the duplicate filter above will catch them before needing
-					// to do a heavy signature check.
-					//
-					// This is only really important until the post-conclusion acceptance threshold
-					// is reached, and then no part of this loop will be hit.
-					if let Err(()) = check_signature(
-						&validator_public,
-						set.candidate_hash,
-						set.session,
-						statement,
-						signature,
-					) {
-						importer.undo(undo);
-						filter.remove_index(i);
-						continue
-					}
-				}
+				// Check signature after attempting import.
+				//
+				// Since we expect that this filter will be applied to
+				// disputes long after they're concluded, 99% of the time,
+				// the duplicate filter above will catch them before needing
+				// to do a heavy signature check.
+				//
+				// This is only really important until the post-conclusion acceptance threshold
+				// is reached, and then no part of this loop will be hit.
+				if let Err(()) = check_signature(
+					&validator_public,
+					set.candidate_hash,
+					set.session,
+					statement,
+					signature,
+				) {
+					importer.undo(undo);
+					filter.remove_index(i);
+					continue
+				};
 			}
 
 			importer.finish()
@@ -1126,8 +1047,8 @@ impl<T: Config> Pallet<T> {
 	/// Fails if the dispute data is invalid. Returns a Boolean indicating whether the
 	/// dispute is fresh.
 	fn process_checked_dispute_data(
-		set: CheckedDisputeStatementSet,
-		dispute_post_conclusion_acceptance_period: T::BlockNumber,
+		set: &CheckedDisputeStatementSet,
+		dispute_post_conclusion_acceptance_period: BlockNumberFor<T>,
 	) -> Result<bool, DispatchError> {
 		// Dispute statement sets on any dispute which concluded
 		// before this point are to be rejected.
@@ -1257,8 +1178,9 @@ impl<T: Config> Pallet<T> {
 
 		<Disputes<T>>::insert(&session, &candidate_hash, &summary.state);
 
-		// Freeze if just concluded against some local candidate
-		if summary.new_flags.contains(DisputeStateFlags::AGAINST_SUPERMAJORITY) {
+		// Freeze if the INVALID votes against some local candidate are above the byzantine
+		// threshold
+		if summary.new_flags.contains(DisputeStateFlags::AGAINST_BYZANTINE) {
 			if let Some(revert_to) = <Included<T>>::get(&session, &candidate_hash) {
 				Self::revert_and_freeze(revert_to);
 			}
@@ -1268,14 +1190,15 @@ impl<T: Config> Pallet<T> {
 	}
 
 	#[allow(unused)]
-	pub(crate) fn disputes() -> Vec<(SessionIndex, CandidateHash, DisputeState<T::BlockNumber>)> {
+	pub(crate) fn disputes() -> Vec<(SessionIndex, CandidateHash, DisputeState<BlockNumberFor<T>>)>
+	{
 		<Disputes<T>>::iter().collect()
 	}
 
 	pub(crate) fn note_included(
 		session: SessionIndex,
 		candidate_hash: CandidateHash,
-		included_in: T::BlockNumber,
+		included_in: BlockNumberFor<T>,
 	) {
 		if included_in.is_zero() {
 			return
@@ -1295,7 +1218,7 @@ impl<T: Config> Pallet<T> {
 	pub(crate) fn included_state(
 		session: SessionIndex,
 		candidate_hash: CandidateHash,
-	) -> Option<T::BlockNumber> {
+	) -> Option<BlockNumberFor<T>> {
 		<Included<T>>::get(session, candidate_hash)
 	}
 
@@ -1310,7 +1233,7 @@ impl<T: Config> Pallet<T> {
 		Self::last_valid_block().is_some()
 	}
 
-	pub(crate) fn revert_and_freeze(revert_to: T::BlockNumber) {
+	pub(crate) fn revert_and_freeze(revert_to: BlockNumberFor<T>) {
 		if Self::last_valid_block().map_or(true, |last| last > revert_to) {
 			Frozen::<T>::set(Some(revert_to));
 
@@ -1357,9 +1280,14 @@ fn check_signature(
 			ExplicitDisputeStatement { valid: false, candidate_hash, session }.signing_payload(),
 	};
 
-	if validator_signature.verify(&payload[..], &validator_public) {
-		Ok(())
-	} else {
-		Err(())
-	}
+	let start = get_current_time();
+
+	let res =
+		if validator_signature.verify(&payload[..], &validator_public) { Ok(()) } else { Err(()) };
+
+	let end = get_current_time();
+
+	METRICS.on_signature_check_complete(end.saturating_sub(start)); // ns
+
+	res
 }

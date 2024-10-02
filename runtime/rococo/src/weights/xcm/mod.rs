@@ -1,4 +1,4 @@
-// Copyright 2017-2023 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -48,7 +48,7 @@ trait WeighMultiAssets {
 }
 
 // Rococo only knows about one asset, the balances pallet.
-const MAX_ASSETS: u32 = 1;
+const MAX_ASSETS: u64 = 1;
 
 impl WeighMultiAssets for MultiAssetFilter {
 	fn weigh_multi_assets(&self, balances_weight: Weight) -> Weight {
@@ -62,9 +62,12 @@ impl WeighMultiAssets for MultiAssetFilter {
 					AssetTypes::Unknown => Weight::MAX,
 				})
 				.fold(Weight::zero(), |acc, x| acc.saturating_add(x)),
+			// We don't support any NFTs on Rococo, so these two variants will always match
+			// only 1 kind of fungible asset.
 			Self::Wild(AllOf { .. } | AllOfCounted { .. }) => balances_weight,
-			Self::Wild(AllCounted(count)) => balances_weight.saturating_mul(*count as u64),
-			Self::Wild(All) => balances_weight.saturating_mul(MAX_ASSETS as u64),
+			Self::Wild(AllCounted(count)) =>
+				balances_weight.saturating_mul(MAX_ASSETS.min(*count as u64)),
+			Self::Wild(All) => balances_weight.saturating_mul(MAX_ASSETS),
 		}
 	}
 }
@@ -88,6 +91,7 @@ impl<RuntimeCall> XcmWeightInfo<RuntimeCall> for RococoXcmWeight<RuntimeCall> {
 		assets.weigh_multi_assets(XcmBalancesWeight::<Runtime>::withdraw_asset())
 	}
 	fn reserve_asset_deposited(assets: &MultiAssets) -> Weight {
+		// Rococo doesn't support ReserveAssetDeposited, so this benchmark has a default weight
 		assets.weigh_multi_assets(XcmBalancesWeight::<Runtime>::reserve_asset_deposited())
 	}
 	fn receive_teleported_asset(assets: &MultiAssets) -> Weight {
@@ -163,7 +167,7 @@ impl<RuntimeCall> XcmWeightInfo<RuntimeCall> for RococoXcmWeight<RuntimeCall> {
 		_reserve: &MultiLocation,
 		_xcm: &Xcm<()>,
 	) -> Weight {
-		assets.weigh_multi_assets(XcmGeneric::<Runtime>::initiate_reserve_withdraw())
+		assets.weigh_multi_assets(XcmBalancesWeight::<Runtime>::initiate_reserve_withdraw())
 	}
 	fn initiate_teleport(
 		assets: &MultiAssetFilter,
@@ -240,7 +244,8 @@ impl<RuntimeCall> XcmWeightInfo<RuntimeCall> for RococoXcmWeight<RuntimeCall> {
 		Weight::MAX
 	}
 	fn export_message(_: &NetworkId, _: &Junctions, _: &Xcm<()>) -> Weight {
-		Weight::MAX // todo fix
+		// Rococo relay should not support export message operations
+		Weight::MAX
 	}
 	fn lock_asset(_: &MultiAsset, _: &MultiLocation) -> Weight {
 		// Rococo does not currently support asset locking operations
@@ -274,4 +279,12 @@ impl<RuntimeCall> XcmWeightInfo<RuntimeCall> for RococoXcmWeight<RuntimeCall> {
 	fn unpaid_execution(_: &WeightLimit, _: &Option<MultiLocation>) -> Weight {
 		XcmGeneric::<Runtime>::unpaid_execution()
 	}
+}
+
+#[test]
+fn all_counted_has_a_sane_weight_upper_limit() {
+	let assets = MultiAssetFilter::Wild(AllCounted(4294967295));
+	let weight = Weight::from_parts(1000, 1000);
+
+	assert_eq!(assets.weigh_multi_assets(weight), weight * MAX_ASSETS);
 }

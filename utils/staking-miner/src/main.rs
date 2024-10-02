@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -50,13 +50,12 @@ use frame_election_provider_support::NposSolver;
 use frame_support::traits::Get;
 use futures_util::StreamExt;
 use jsonrpsee::ws_client::{WsClient, WsClientBuilder};
-use remote_externalities::{Builder, Mode, OnlineConfig};
+use remote_externalities::{Builder, Mode, OnlineConfig, Transport};
 use rpc::{RpcApiClient, SharedRpcClient};
 use runtime_versions::RuntimeVersions;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use sp_npos_elections::BalancingConfig;
-use sp_runtime::{traits::Block as BlockT, DeserializeOwned};
 use std::{ops::Deref, sync::Arc, time::Duration};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -83,7 +82,7 @@ macro_rules! construct_runtime_prelude {
 				pub(crate) fn [<create_uxt_ $runtime>](
 					raw_solution: EPM::RawSolution<EPM::SolutionOf<Runtime>>,
 					signer: crate::signer::Signer,
-					nonce: crate::prelude::Index,
+					nonce: crate::prelude::Nonce,
 					tip: crate::prelude::Balance,
 					era: sp_runtime::generic::Era,
 				) -> UncheckedExtrinsic {
@@ -121,7 +120,7 @@ macro_rules! construct_runtime_prelude {
 
 // NOTE: we might be able to use some code from the bridges repo here.
 fn signed_ext_builder_polkadot(
-	nonce: Index,
+	nonce: Nonce,
 	tip: Balance,
 	era: sp_runtime::generic::Era,
 ) -> polkadot_runtime_exports::SignedExtra {
@@ -140,7 +139,7 @@ fn signed_ext_builder_polkadot(
 }
 
 fn signed_ext_builder_kusama(
-	nonce: Index,
+	nonce: Nonce,
 	tip: Balance,
 	era: sp_runtime::generic::Era,
 ) -> kusama_runtime_exports::SignedExtra {
@@ -158,7 +157,7 @@ fn signed_ext_builder_kusama(
 }
 
 fn signed_ext_builder_westend(
-	nonce: Index,
+	nonce: Nonce,
 	tip: Balance,
 	era: sp_runtime::generic::Era,
 ) -> westend_runtime_exports::SignedExtra {
@@ -295,15 +294,13 @@ frame_support::parameter_types! {
 
 /// Build the Ext at hash with all the data of `ElectionProviderMultiPhase` and any additional
 /// pallets.
-async fn create_election_ext<T, B>(
+async fn create_election_ext<T>(
 	client: SharedRpcClient,
-	at: Option<B::Hash>,
+	at: Option<Hash>,
 	additional: Vec<String>,
 ) -> Result<Ext, Error<T>>
 where
 	T: EPM::Config,
-	B: BlockT + DeserializeOwned,
-	B::Header: DeserializeOwned,
 {
 	use frame_support::{storage::generator::StorageMap, traits::PalletInfo};
 	use sp_core::hashing::twox_128;
@@ -312,9 +309,9 @@ where
 		.expect("Pallet always has name; qed.")
 		.to_string()];
 	pallets.extend(additional);
-	Builder::<B>::new()
+	Builder::<Block>::new()
 		.mode(Mode::Online(OnlineConfig {
-			transport: client.into_inner().into(),
+			transport: Transport::Uri(client.uri().to_owned()),
 			at,
 			pallets,
 			hashed_prefixes: vec![<frame_system::BlockHash<T>>::prefix_hash()],
@@ -323,7 +320,7 @@ where
 		}))
 		.build()
 		.await
-		.map_err(|why| Error::RemoteExternalities(why))
+		.map_err(|why| Error::<T>::RemoteExternalities(why))
 		.map(|rx| rx.inner_ext)
 }
 

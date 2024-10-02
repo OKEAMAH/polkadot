@@ -1,4 +1,4 @@
-// Copyright 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -30,9 +30,20 @@ pub(crate) const MAX_JUNCTIONS: usize = 8;
 /// Parent junctions cannot be constructed with this type. Refer to `MultiLocation` for
 /// instructions on constructing parent junctions.
 #[derive(
-	Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Encode, Decode, Debug, TypeInfo, MaxEncodedLen,
+	Copy,
+	Clone,
+	Eq,
+	PartialEq,
+	Ord,
+	PartialOrd,
+	Encode,
+	Decode,
+	Debug,
+	TypeInfo,
+	MaxEncodedLen,
+	serde::Serialize,
+	serde::Deserialize,
 )]
-#[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
 pub enum Junctions {
 	/// The interpreting consensus system.
 	Here,
@@ -126,7 +137,8 @@ impl Junctions {
 
 	/// Convert `self` into a `MultiLocation` containing `n` parents.
 	///
-	/// Similar to `Self::into_location`, with the added ability to specify the number of parent junctions.
+	/// Similar to `Self::into_location`, with the added ability to specify the number of parent
+	/// junctions.
 	pub const fn into_exterior(self, n: u8) -> MultiLocation {
 		MultiLocation { parents: n, interior: self }
 	}
@@ -298,8 +310,8 @@ impl Junctions {
 		}
 	}
 
-	/// Splits off the first junction, returning the remaining suffix (first item in tuple) and the first element
-	/// (second item in tuple) or `None` if it was empty.
+	/// Splits off the first junction, returning the remaining suffix (first item in tuple) and the
+	/// first element (second item in tuple) or `None` if it was empty.
 	pub fn split_first(self) -> (Junctions, Option<Junction>) {
 		match self {
 			Junctions::Here => (Junctions::Here, None),
@@ -314,8 +326,8 @@ impl Junctions {
 		}
 	}
 
-	/// Splits off the last junction, returning the remaining prefix (first item in tuple) and the last element
-	/// (second item in tuple) or `None` if it was empty.
+	/// Splits off the last junction, returning the remaining prefix (first item in tuple) and the
+	/// last element (second item in tuple) or `None` if it was empty.
 	pub fn split_last(self) -> (Junctions, Option<Junction>) {
 		match self {
 			Junctions::Here => (Junctions::Here, None),
@@ -458,7 +470,8 @@ impl Junctions {
 		}
 	}
 
-	/// Returns the junction at index `i`, or `None` if the location doesn't contain that many elements.
+	/// Returns the junction at index `i`, or `None` if the location doesn't contain that many
+	/// elements.
 	pub fn at(&self, i: usize) -> Option<&Junction> {
 		Some(match (i, self) {
 			(0, Junctions::X1(ref a)) => a,
@@ -501,8 +514,8 @@ impl Junctions {
 		})
 	}
 
-	/// Returns a mutable reference to the junction at index `i`, or `None` if the location doesn't contain that many
-	/// elements.
+	/// Returns a mutable reference to the junction at index `i`, or `None` if the location doesn't
+	/// contain that many elements.
 	pub fn at_mut(&mut self, i: usize) -> Option<&mut Junction> {
 		Some(match (i, self) {
 			(0, Junctions::X1(ref mut a)) => a,

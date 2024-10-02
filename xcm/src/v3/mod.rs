@@ -1,5 +1,5 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
-// This file is part of Cumulus.
+// Copyright (C) Parity Technologies (UK) Ltd.
+// This file is part of Polkadot.
 
 // Substrate is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -12,7 +12,7 @@
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Cumulus.  If not, see <http://www.gnu.org/licenses/>.
+// along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Version 3 of the Cross-Consensus Message format data structures.
 
@@ -22,6 +22,7 @@ use super::v2::{
 };
 use crate::{DoubleEncoded, GetWeight};
 use alloc::{vec, vec::Vec};
+use bounded_collections::{parameter_types, BoundedVec};
 use core::{
 	convert::{TryFrom, TryInto},
 	fmt::Debug,
@@ -48,7 +49,7 @@ pub use multilocation::{
 };
 pub use traits::{
 	send_xcm, validate_send, Error, ExecuteXcm, Outcome, PreparedMessage, Result, SendError,
-	SendResult, SendXcm, Unwrappable, Weight, XcmHash,
+	SendResult, SendXcm, Weight, XcmHash,
 };
 // These parts of XCM v2 are unchanged in XCM v3, and are re-imported here.
 pub use super::v2::OriginKind;
@@ -183,7 +184,7 @@ pub mod prelude {
 			NetworkId::{self, *},
 			OriginKind, Outcome, PalletInfo, Parent, ParentThen, PreparedMessage, QueryId,
 			QueryResponseInfo, Response, Result as XcmResult, SendError, SendResult, SendXcm,
-			Unwrappable,
+			Weight,
 			WeightLimit::{self, *},
 			WildFungibility::{self, Fungible as WildFungible, NonFungible as WildNonFungible},
 			WildMultiAsset::{self, *},
@@ -200,14 +201,20 @@ pub mod prelude {
 	}
 }
 
-#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug, TypeInfo)]
+parameter_types! {
+	pub MaxPalletNameLen: u32 = 48;
+	/// Maximum size of the encoded error code coming from a `Dispatch` result, used for
+	/// `MaybeErrorCode`. This is not (yet) enforced, so it's just an indication of expectation.
+	pub MaxDispatchErrorLen: u32 = 128;
+	pub MaxPalletsInfo: u32 = 64;
+}
+
+#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug, TypeInfo, MaxEncodedLen)]
 pub struct PalletInfo {
 	#[codec(compact)]
 	index: u32,
-	// TODO: Change to `BoundedVec` so `MaxEncodedLen` derive will work.
-	name: Vec<u8>,
-	// TODO: Change to `BoundedVec` so `MaxEncodedLen` derive will work.
-	module_name: Vec<u8>,
+	name: BoundedVec<u8, MaxPalletNameLen>,
+	module_name: BoundedVec<u8, MaxPalletNameLen>,
 	#[codec(compact)]
 	major: u32,
 	#[codec(compact)]
@@ -215,8 +222,6 @@ pub struct PalletInfo {
 	#[codec(compact)]
 	patch: u32,
 }
-
-const MAX_NAME_LEN: usize = 48;
 
 impl PalletInfo {
 	pub fn new(
@@ -227,44 +232,25 @@ impl PalletInfo {
 		minor: u32,
 		patch: u32,
 	) -> result::Result<Self, Error> {
-		if name.len() > MAX_NAME_LEN || module_name.len() > MAX_NAME_LEN {
-			return Err(Error::Overflow)
-		}
+		let name = BoundedVec::try_from(name).map_err(|_| Error::Overflow)?;
+		let module_name = BoundedVec::try_from(module_name).map_err(|_| Error::Overflow)?;
+
 		Ok(Self { index, name, module_name, major, minor, patch })
 	}
 }
 
-impl MaxEncodedLen for PalletInfo {
-	fn max_encoded_len() -> usize {
-		parity_scale_codec::Compact::<u32>::max_encoded_len() * 4 + (MAX_NAME_LEN + 1) * 2
-	}
-}
-
-#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug, TypeInfo)]
+#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug, TypeInfo, MaxEncodedLen)]
 pub enum MaybeErrorCode {
 	Success,
-	// TODO: Change to a `BoundedVec` so that deriving `MaxEncodedLen` works.
-	Error(Vec<u8>),
-	TruncatedError(Vec<u8>),
-}
-
-/// Maximum size of the encoded error code coming from a `Dispatch` result, used for
-/// `MaybeErrorCode`. This is not (yet) enforced, so it's just an indication of expectation.
-const MAX_DISPATCH_ERROR_LEN: usize = 128;
-
-impl MaxEncodedLen for MaybeErrorCode {
-	fn max_encoded_len() -> usize {
-		MAX_DISPATCH_ERROR_LEN + 3
-	}
+	Error(BoundedVec<u8, MaxDispatchErrorLen>),
+	TruncatedError(BoundedVec<u8, MaxDispatchErrorLen>),
 }
 
 impl From<Vec<u8>> for MaybeErrorCode {
-	fn from(mut v: Vec<u8>) -> Self {
-		if v.len() <= MAX_DISPATCH_ERROR_LEN {
-			MaybeErrorCode::Error(v)
-		} else {
-			v.truncate(MAX_DISPATCH_ERROR_LEN);
-			MaybeErrorCode::TruncatedError(v)
+	fn from(v: Vec<u8>) -> Self {
+		match BoundedVec::try_from(v) {
+			Ok(error) => MaybeErrorCode::Error(error),
+			Err(error) => MaybeErrorCode::TruncatedError(BoundedVec::truncate_from(error)),
 		}
 	}
 }
@@ -272,26 +258,6 @@ impl From<Vec<u8>> for MaybeErrorCode {
 impl Default for MaybeErrorCode {
 	fn default() -> MaybeErrorCode {
 		MaybeErrorCode::Success
-	}
-}
-
-/// Maximum number of pallets which we expect to be returned in `PalletsInfo`.
-const MAX_PALLETS_INFO_LEN: usize = 64;
-
-#[derive(Clone, Eq, PartialEq, Encode, Decode, Debug, TypeInfo)]
-pub struct VecPalletInfo(Vec<PalletInfo>);
-impl TryFrom<Vec<PalletInfo>> for VecPalletInfo {
-	type Error = Error;
-	fn try_from(v: Vec<PalletInfo>) -> result::Result<Self, Error> {
-		if v.len() > MAX_PALLETS_INFO_LEN {
-			return Err(Error::Overflow)
-		}
-		Ok(VecPalletInfo(v))
-	}
-}
-impl MaxEncodedLen for VecPalletInfo {
-	fn max_encoded_len() -> usize {
-		PalletInfo::max_encoded_len() * MAX_PALLETS_INFO_LEN
 	}
 }
 
@@ -307,8 +273,7 @@ pub enum Response {
 	/// An XCM version.
 	Version(super::Version),
 	/// The index, instance name, pallet name and version of some pallets.
-	// TODO: Change to a `BoundedVec` so that deriving `MaxEncodedLen` works.
-	PalletsInfo(VecPalletInfo),
+	PalletsInfo(BoundedVec<PalletInfo, MaxPalletsInfo>),
 	/// The status of a dispatch attempt using `Transact`.
 	DispatchResult(MaybeErrorCode),
 }
@@ -372,19 +337,27 @@ impl TryFrom<OldWeightLimit> for WeightLimit {
 /// Contextual data pertaining to a specific list of XCM instructions.
 #[derive(Clone, Eq, PartialEq, Encode, Decode, Debug)]
 pub struct XcmContext {
-	/// The `MultiLocation` origin of the corresponding XCM.
+	/// The current value of the Origin register of the `XCVM`.
 	pub origin: Option<MultiLocation>,
-	/// The hash of the XCM.
-	pub message_hash: XcmHash,
-	/// The topic of the XCM.
+	/// The identity of the XCM; this may be a hash of its versioned encoding but could also be
+	/// a high-level identity set by an appropriate barrier.
+	pub message_id: XcmHash,
+	/// The current value of the Topic register of the `XCVM`.
 	pub topic: Option<[u8; 32]>,
 }
 
 impl XcmContext {
-	/// Constructor which sets the message hash to the supplied parameter and leaves the origin and
+	/// Constructor which sets the message ID to the supplied parameter and leaves the origin and
 	/// topic unset.
-	pub fn with_message_hash(message_hash: XcmHash) -> XcmContext {
-		XcmContext { origin: None, message_hash, topic: None }
+	#[deprecated = "Use `with_message_id` instead."]
+	pub fn with_message_hash(message_id: XcmHash) -> XcmContext {
+		XcmContext { origin: None, message_id, topic: None }
+	}
+
+	/// Constructor which sets the message ID to the supplied parameter and leaves the origin and
+	/// topic unset.
+	pub fn with_message_id(message_id: XcmHash) -> XcmContext {
+		XcmContext { origin: None, message_id, topic: None }
 	}
 }
 
@@ -394,8 +367,8 @@ impl XcmContext {
 ///
 /// All messages are delivered from a known *origin*, expressed as a `MultiLocation`.
 ///
-/// This is the inner XCM format and is version-sensitive. Messages are typically passed using the outer
-/// XCM format, known as `VersionedXcm`.
+/// This is the inner XCM format and is version-sensitive. Messages are typically passed using the
+/// outer XCM format, known as `VersionedXcm`.
 #[derive(Derivative, Encode, Decode, TypeInfo, xcm_procedural::XcmWeightInfoTrait)]
 #[derivative(Clone(bound = ""), Eq(bound = ""), PartialEq(bound = ""), Debug(bound = ""))]
 #[codec(encode_bound())]
@@ -407,7 +380,7 @@ pub enum Instruction<Call> {
 	///
 	/// - `assets`: The asset(s) to be withdrawn into holding.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	WithdrawAsset(MultiAssets),
@@ -444,9 +417,8 @@ pub enum Instruction<Call> {
 	/// - `response`: The message content.
 	/// - `max_weight`: The maximum weight that handling this response should take.
 	/// - `querier`: The location responsible for the initiation of the response, if there is one.
-	///   In general this will tend to be the same location as the receiver of this message.
-	///   NOTE: As usual, this is interpreted from the perspective of the receiving consensus
-	///   system.
+	///   In general this will tend to be the same location as the receiver of this message. NOTE:
+	///   As usual, this is interpreted from the perspective of the receiving consensus system.
 	///
 	/// Safety: Since this is information only, there are no immediate concerns. However, it should
 	/// be remembered that even if the Origin behaves reasonably, it can always be asked to make
@@ -472,7 +444,7 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	TransferAsset { assets: MultiAssets, beneficiary: MultiLocation },
@@ -487,12 +459,12 @@ pub enum Instruction<Call> {
 	/// - `dest`: The location whose sovereign account will own the assets and thus the effective
 	///   beneficiary for the assets and the notification target for the reserve asset deposit
 	///   message.
-	/// - `xcm`: The instructions that should follow the `ReserveAssetDeposited`
-	///   instruction, which is sent onwards to `dest`.
+	/// - `xcm`: The instructions that should follow the `ReserveAssetDeposited` instruction, which
+	///   is sent onwards to `dest`.
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	TransferReserveAsset { assets: MultiAssets, dest: MultiLocation, xcm: Xcm<()> },
@@ -509,15 +481,16 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	Transact { origin_kind: OriginKind, require_weight_at_most: Weight, call: DoubleEncoded<Call> },
 
-	/// A message to notify about a new incoming HRMP channel. This message is meant to be sent by the
-	/// relay-chain to a para.
+	/// A message to notify about a new incoming HRMP channel. This message is meant to be sent by
+	/// the relay-chain to a para.
 	///
-	/// - `sender`: The sender in the to-be opened channel. Also, the initiator of the channel opening.
+	/// - `sender`: The sender in the to-be opened channel. Also, the initiator of the channel
+	///   opening.
 	/// - `max_message_size`: The maximum size of a message proposed by the sender.
 	/// - `max_capacity`: The maximum number of messages that can be queued in the channel.
 	///
@@ -534,8 +507,8 @@ pub enum Instruction<Call> {
 	},
 
 	/// A message to notify about that a previously sent open channel request has been accepted by
-	/// the recipient. That means that the channel will be opened during the next relay-chain session
-	/// change. This message is meant to be sent by the relay-chain to a para.
+	/// the recipient. That means that the channel will be opened during the next relay-chain
+	/// session change. This message is meant to be sent by the relay-chain to a para.
 	///
 	/// Safety: The message should originate directly from the relay-chain.
 	///
@@ -549,10 +522,10 @@ pub enum Instruction<Call> {
 		recipient: u32,
 	},
 
-	/// A message to notify that the other party in an open channel decided to close it. In particular,
-	/// `initiator` is going to close the channel opened from `sender` to the `recipient`. The close
-	/// will be enacted at the next relay-chain session change. This message is meant to be sent by
-	/// the relay-chain to a para.
+	/// A message to notify that the other party in an open channel decided to close it. In
+	/// particular, `initiator` is going to close the channel opened from `sender` to the
+	/// `recipient`. The close will be enacted at the next relay-chain session change. This message
+	/// is meant to be sent by the relay-chain to a para.
 	///
 	/// Safety: The message should originate directly from the relay-chain.
 	///
@@ -576,14 +549,14 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	ClearOrigin,
 
 	/// Mutate the origin to some interior location.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DescendOrigin(InteriorMultiLocation),
@@ -594,7 +567,7 @@ pub enum Instruction<Call> {
 	///
 	/// - `response_info`: Information for making the response.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ReportError(QueryResponseInfo),
@@ -605,7 +578,7 @@ pub enum Instruction<Call> {
 	/// - `assets`: The asset(s) to remove from holding.
 	/// - `beneficiary`: The new owner for the assets.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DepositAsset { assets: MultiAssetFilter, beneficiary: MultiLocation },
@@ -620,10 +593,10 @@ pub enum Instruction<Call> {
 	/// - `dest`: The location whose sovereign account will own the assets and thus the effective
 	///   beneficiary for the assets and the notification target for the reserve asset deposit
 	///   message.
-	/// - `xcm`: The orders that should follow the `ReserveAssetDeposited` instruction
-	///   which is sent onwards to `dest`.
+	/// - `xcm`: The orders that should follow the `ReserveAssetDeposited` instruction which is
+	///   sent onwards to `dest`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DepositReserveAsset { assets: MultiAssetFilter, dest: MultiLocation, xcm: Xcm<()> },
@@ -640,7 +613,7 @@ pub enum Instruction<Call> {
 	///   and receive accordingly more. If `false`, then prefer to give as little as possible in
 	///   order to receive as little as possible while receiving at least `want`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ExchangeAsset { give: MultiAssetFilter, want: MultiAssets, maximal: bool },
@@ -650,13 +623,13 @@ pub enum Instruction<Call> {
 	///
 	/// - `assets`: The asset(s) to remove from holding.
 	/// - `reserve`: A valid location that acts as a reserve for all asset(s) in `assets`. The
-	///   sovereign account of this consensus system *on the reserve location* will have appropriate
-	///   assets withdrawn and `effects` will be executed on them. There will typically be only one
-	///   valid location on any given asset/chain combination.
+	///   sovereign account of this consensus system *on the reserve location* will have
+	///   appropriate assets withdrawn and `effects` will be executed on them. There will typically
+	///   be only one valid location on any given asset/chain combination.
 	/// - `xcm`: The instructions to execute on the assets once withdrawn *on the reserve
 	///   location*.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	InitiateReserveWithdraw { assets: MultiAssetFilter, reserve: MultiLocation, xcm: Xcm<()> },
@@ -669,10 +642,10 @@ pub enum Instruction<Call> {
 	/// - `xcm`: The instructions to execute on the assets once arrived *on the destination
 	///   location*.
 	///
-	/// NOTE: The `dest` location *MUST* respect this origin as a valid teleportation origin for all
-	/// `assets`. If it does not, then the assets may be lost.
+	/// NOTE: The `dest` location *MUST* respect this origin as a valid teleportation origin for
+	/// all `assets`. If it does not, then the assets may be lost.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	InitiateTeleport { assets: MultiAssetFilter, dest: MultiLocation, xcm: Xcm<()> },
@@ -686,7 +659,7 @@ pub enum Instruction<Call> {
 	///   will be, asset-wise, *the lesser of this value and the holding register*. No wildcards
 	///   will be used when reporting assets back.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ReportHolding { response_info: QueryResponseInfo, assets: MultiAssetFilter },
@@ -699,14 +672,14 @@ pub enum Instruction<Call> {
 	///   expected maximum weight of the total XCM to be executed for the
 	///   `AllowTopLevelPaidExecutionFrom` barrier to allow the XCM be executed.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	BuyExecution { fees: MultiAsset, weight_limit: WeightLimit },
 
 	/// Refund any surplus weight previously bought with `BuyExecution`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	RefundSurplus,
@@ -722,7 +695,7 @@ pub enum Instruction<Call> {
 	/// weight however includes only the difference between the previous handler and the new
 	/// handler, which can reasonably be negative, which would result in a surplus.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	SetErrorHandler(Xcm<Call>),
@@ -738,14 +711,14 @@ pub enum Instruction<Call> {
 	/// weight however includes only the difference between the previous appendix and the new
 	/// appendix, which can reasonably be negative, which would result in a surplus.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	SetAppendix(Xcm<Call>),
 
 	/// Clear the Error Register.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	ClearError,
@@ -757,14 +730,14 @@ pub enum Instruction<Call> {
 	/// - `ticket`: The ticket of the asset; this is an abstract identifier to help locate the
 	///   asset.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ClaimAsset { assets: MultiAssets, ticket: MultiLocation },
 
 	/// Always throws an error of type `Trap`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `Trap`: All circumstances, whose inner value is the same as this item's inner value.
@@ -779,7 +752,7 @@ pub enum Instruction<Call> {
 	///   is sent as a reply may take to execute. NOTE: If this is unexpectedly large then the
 	///   response may not execute at all.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*
 	SubscribeVersion {
@@ -790,7 +763,7 @@ pub enum Instruction<Call> {
 
 	/// Cancel the effect of a previous `SubscribeVersion` instruction.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*
 	UnsubscribeVersion,
@@ -801,14 +774,14 @@ pub enum Instruction<Call> {
 	/// error if the Holding does not contain the assets (to make this an error, use `ExpectAsset`
 	/// prior).
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Infallible*
 	BurnAsset(MultiAssets),
 
 	/// Throw an error if Holding does not contain at least the given assets.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `ExpectationFalse`: If Holding Register does not contain the assets in the parameter.
@@ -816,7 +789,7 @@ pub enum Instruction<Call> {
 
 	/// Ensure that the Origin Register equals some given value and throw an error if not.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `ExpectationFalse`: If Origin Register is not equal to the parameter.
@@ -824,7 +797,7 @@ pub enum Instruction<Call> {
 
 	/// Ensure that the Error Register equals some given value and throw an error if not.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `ExpectationFalse`: If the value of the Error Register is not equal to the parameter.
@@ -833,10 +806,11 @@ pub enum Instruction<Call> {
 	/// Ensure that the Transact Status Register equals some given value and throw an error if
 	/// not.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
-	/// - `ExpectationFalse`: If the value of the Transact Status Register is not equal to the parameter.
+	/// - `ExpectationFalse`: If the value of the Transact Status Register is not equal to the
+	///   parameter.
 	ExpectTransactStatus(MaybeErrorCode),
 
 	/// Query the existence of a particular pallet type.
@@ -850,22 +824,26 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*.
 	QueryPallet { module_name: Vec<u8>, response_info: QueryResponseInfo },
 
 	/// Ensure that a particular pallet with a particular version exists.
 	///
-	/// - `index: Compact`: The index which identifies the pallet. An error if no pallet exists at this index.
+	/// - `index: Compact`: The index which identifies the pallet. An error if no pallet exists at
+	///   this index.
 	/// - `name: Vec<u8>`: Name which must be equal to the name of the pallet.
-	/// - `module_name: Vec<u8>`: Module name which must be equal to the name of the module in which the pallet exists.
-	/// - `crate_major: Compact`: Version number which must be equal to the major version of the crate which implements the pallet.
-	/// - `min_crate_minor: Compact`: Version number which must be at most the minor version of the crate which implements the pallet.
+	/// - `module_name: Vec<u8>`: Module name which must be equal to the name of the module in
+	///   which the pallet exists.
+	/// - `crate_major: Compact`: Version number which must be equal to the major version of the
+	///   crate which implements the pallet.
+	/// - `min_crate_minor: Compact`: Version number which must be at most the minor version of the
+	///   crate which implements the pallet.
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `ExpectationFalse`: In case any of the expectations are broken.
@@ -888,7 +866,7 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*.
 	ReportTransactStatus(QueryResponseInfo),
@@ -897,7 +875,7 @@ pub enum Instruction<Call> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Infallible*.
 	ClearTransactStatus,
@@ -912,7 +890,7 @@ pub enum Instruction<Call> {
 	/// The `Junction` parameter should generally be a `GlobalConsensus` variant since it is only
 	/// these which are children of the Universal Ancestor.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*.
 	UniversalOrigin(Junction),
@@ -933,7 +911,7 @@ pub enum Instruction<Call> {
 	/// `destination: X1(Parachain(1000))`. Alternatively, to export a message for execution on
 	/// Polkadot, you would call with `network: NetworkId:: Polkadot` and `destination: Here`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*.
 	ExportMessage { network: NetworkId, destination: InteriorMultiLocation, xcm: Xcm<()> },
@@ -949,7 +927,7 @@ pub enum Instruction<Call> {
 	/// - `unlocker`: The value which the Origin must be for a corresponding `UnlockAsset`
 	///   instruction to work.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	LockAsset { asset: MultiAsset, unlocker: MultiLocation },
@@ -958,17 +936,17 @@ pub enum Instruction<Call> {
 	/// asset to be transferred.
 	///
 	/// - `asset`: The asset to be unlocked.
-	/// - `owner`: The owner of the asset on the local chain.
+	/// - `target`: The owner of the asset on the local chain.
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	UnlockAsset { asset: MultiAsset, target: MultiLocation },
 
 	/// Asset (`asset`) has been locked on the `origin` system and may not be transferred. It may
-	/// only be unlocked with the receipt of the `UnlockAsset`  instruction from this chain.
+	/// only be unlocked with the receipt of the `UnlockAsset` instruction from this chain.
 	///
 	/// - `asset`: The asset(s) which are now unlockable from this origin.
 	/// - `owner`: The owner of the asset on the chain in which it was locked. This may be a
@@ -988,43 +966,47 @@ pub enum Instruction<Call> {
 	/// of course, if there is no record that the asset actually is locked.
 	///
 	/// - `asset`: The asset(s) to be unlocked.
-	/// - `locker`: The location from which a previous `NoteUnlockable` was sent and to which
-	///   an `UnlockAsset` should be sent.
+	/// - `locker`: The location from which a previous `NoteUnlockable` was sent and to which an
+	///   `UnlockAsset` should be sent.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	RequestUnlock { asset: MultiAsset, locker: MultiLocation },
 
 	/// Sets the Fees Mode Register.
 	///
-	/// - `jit_withdraw`: The fees mode item; if set to `true` then fees for any instructions
-	///   are withdrawn as needed using the same mechanism as `WithdrawAssets`.
+	/// - `jit_withdraw`: The fees mode item; if set to `true` then fees for any instructions are
+	///   withdrawn as needed using the same mechanism as `WithdrawAssets`.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	SetFeesMode { jit_withdraw: bool },
 
 	/// Set the Topic Register.
 	///
+	/// The 32-byte array identifier in the parameter is not guaranteed to be
+	/// unique; if such a property is desired, it is up to the code author to
+	/// enforce uniqueness.
+	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	SetTopic([u8; 32]),
 
 	/// Clear the Topic Register.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	ClearTopic,
 
 	/// Alter the current Origin to another given origin.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: If the existing state would not allow such a change.
 	AliasOrigin(MultiLocation),
@@ -1224,7 +1206,8 @@ impl<Call> TryFrom<OldXcm<Call>> for Xcm<Call> {
 	}
 }
 
-/// Default value for the proof size weight component. Set at 64 KB.
+/// Default value for the proof size weight component when converting from V2. Set at 64 KB.
+/// NOTE: Make sure this is removed after we properly account for PoV weights.
 const DEFAULT_PROOF_SIZE: u64 = 64 * 1024;
 
 // Convert from a v2 instruction to a v3 instruction.

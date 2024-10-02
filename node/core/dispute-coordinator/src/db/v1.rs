@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -15,9 +15,14 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 //! `V1` database for the dispute coordinator.
+//!
+//! Note that the version here differs from the actual version of the parachains
+//! database (check `CURRENT_VERSION` in `node/service/src/parachains_db/upgrade.rs`).
+//! The code in this module implements the way dispute coordinator works with
+//! the dispute data in the database. Any breaking changes here will still
+//! require a db migration (check `node/service/src/parachains_db/upgrade.rs`).
 
 use polkadot_node_primitives::DisputeStatus;
-use polkadot_node_subsystem::{SubsystemError, SubsystemResult};
 use polkadot_node_subsystem_util::database::{DBTransaction, Database};
 use polkadot_primitives::{
 	CandidateHash, CandidateReceipt, Hash, InvalidDisputeStatementKind, SessionIndex,
@@ -47,8 +52,8 @@ const CLEANED_VOTES_WATERMARK_KEY: &[u8; 23] = b"cleaned-votes-watermark";
 /// this should not be done at once, but rather in smaller batches so nodes won't get stalled by
 /// this.
 ///
-/// 300 is with session duration of 1 hour and 30 parachains around <3_000_000 key purges in the worst
-/// case. Which is already quite a lot, at the same time we have around 21_000 sessions on
+/// 300 is with session duration of 1 hour and 30 parachains around <3_000_000 key purges in the
+/// worst case. Which is already quite a lot, at the same time we have around 21_000 sessions on
 /// Kusama. This means at 300 purged sessions per session, cleaning everything up will take
 /// around 3 days. Depending on how severe disk usage becomes, we might want to bump the batch
 /// size, at the cost of risking issues at session boundaries (performance).
@@ -109,12 +114,12 @@ impl DbBackend {
 
 impl Backend for DbBackend {
 	/// Load the earliest session, if any.
-	fn load_earliest_session(&self) -> SubsystemResult<Option<SessionIndex>> {
+	fn load_earliest_session(&self) -> FatalResult<Option<SessionIndex>> {
 		load_earliest_session(&*self.inner, &self.config)
 	}
 
 	/// Load the recent disputes, if any.
-	fn load_recent_disputes(&self) -> SubsystemResult<Option<RecentDisputes>> {
+	fn load_recent_disputes(&self) -> FatalResult<Option<RecentDisputes>> {
 		load_recent_disputes(&*self.inner, &self.config)
 	}
 
@@ -123,7 +128,7 @@ impl Backend for DbBackend {
 		&self,
 		session: SessionIndex,
 		candidate_hash: &CandidateHash,
-	) -> SubsystemResult<Option<CandidateVotes>> {
+	) -> FatalResult<Option<CandidateVotes>> {
 		load_candidate_votes(&*self.inner, &self.config, session, candidate_hash)
 	}
 
@@ -207,8 +212,6 @@ fn candidate_votes_session_prefix(session: SessionIndex) -> [u8; 15 + 4] {
 pub struct ColumnConfiguration {
 	/// The column in the key-value DB where data is stored.
 	pub col_dispute_data: u32,
-	/// The column in the key-value DB where session data is stored.
-	pub col_session_data: u32,
 }
 
 /// Tracked votes on candidates, for the purposes of dispute resolution.
@@ -287,27 +290,27 @@ pub(crate) fn load_candidate_votes(
 	config: &ColumnConfiguration,
 	session: SessionIndex,
 	candidate_hash: &CandidateHash,
-) -> SubsystemResult<Option<CandidateVotes>> {
+) -> FatalResult<Option<CandidateVotes>> {
 	load_decode(db, config.col_dispute_data, &candidate_votes_key(session, candidate_hash))
-		.map_err(|e| SubsystemError::with_origin("dispute-coordinator", e))
+		.map_err(|e| FatalError::DbReadFailed(e))
 }
 
 /// Load the earliest session, if any.
 pub(crate) fn load_earliest_session(
 	db: &dyn Database,
 	config: &ColumnConfiguration,
-) -> SubsystemResult<Option<SessionIndex>> {
+) -> FatalResult<Option<SessionIndex>> {
 	load_decode(db, config.col_dispute_data, EARLIEST_SESSION_KEY)
-		.map_err(|e| SubsystemError::with_origin("dispute-coordinator", e))
+		.map_err(|e| FatalError::DbReadFailed(e))
 }
 
 /// Load the recent disputes, if any.
 pub(crate) fn load_recent_disputes(
 	db: &dyn Database,
 	config: &ColumnConfiguration,
-) -> SubsystemResult<Option<RecentDisputes>> {
+) -> FatalResult<Option<RecentDisputes>> {
 	load_decode(db, config.col_dispute_data, RECENT_DISPUTES_KEY)
-		.map_err(|e| SubsystemError::with_origin("dispute-coordinator", e))
+		.map_err(|e| FatalError::DbReadFailed(e))
 }
 
 /// Maybe prune data in the DB based on the provided session index.
@@ -321,7 +324,7 @@ pub(crate) fn load_recent_disputes(
 pub(crate) fn note_earliest_session(
 	overlay_db: &mut OverlayedBackend<'_, impl Backend>,
 	new_earliest_session: SessionIndex,
-) -> SubsystemResult<()> {
+) -> FatalResult<()> {
 	match overlay_db.load_earliest_session()? {
 		None => {
 			// First launch - write new-earliest.
@@ -343,7 +346,8 @@ pub(crate) fn note_earliest_session(
 
 				if pruned_disputes.len() != 0 {
 					overlay_db.write_recent_disputes(new_recent_disputes);
-					// Note: Deleting old candidate votes is handled in `write` based on the earliest session.
+					// Note: Deleting old candidate votes is handled in `write` based on the
+					// earliest session.
 				}
 			}
 		},
@@ -379,7 +383,7 @@ mod tests {
 		let db = kvdb_memorydb::create(1);
 		let db = polkadot_node_subsystem_util::database::kvdb_impl::DbAdapter::new(db, &[0]);
 		let store = Arc::new(db);
-		let config = ColumnConfiguration { col_dispute_data: 0, col_session_data: 1 };
+		let config = ColumnConfiguration { col_dispute_data: 0 };
 		DbBackend::new(store, config, Metrics::default())
 	}
 

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -22,9 +22,10 @@ use frame_support::{
 	traits::{Everything, Nothing},
 	weights::{constants::WEIGHT_REF_TIME_PER_SECOND, Weight},
 };
-use sp_core::H256;
+
+use frame_system::EnsureRoot;
+use sp_core::{ConstU32, H256};
 use sp_runtime::{
-	testing::Header,
 	traits::{Hash, IdentityLookup},
 	AccountId32,
 };
@@ -54,13 +55,12 @@ parameter_types! {
 impl frame_system::Config for Runtime {
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeCall = RuntimeCall;
-	type Index = u64;
-	type BlockNumber = u64;
+	type Nonce = u64;
 	type Hash = H256;
 	type Hashing = ::sp_runtime::traits::BlakeTwo256;
 	type AccountId = AccountId;
 	type Lookup = IdentityLookup<Self::AccountId>;
-	type Header = Header;
+	type Block = Block;
 	type RuntimeEvent = RuntimeEvent;
 	type BlockHashCount = BlockHashCount;
 	type BlockWeights = ();
@@ -94,11 +94,15 @@ impl pallet_balances::Config for Runtime {
 	type WeightInfo = ();
 	type MaxReserves = MaxReserves;
 	type ReserveIdentifier = [u8; 8];
+	type RuntimeHoldReason = RuntimeHoldReason;
+	type FreezeIdentifier = ();
+	type MaxHolds = ConstU32<0>;
+	type MaxFreezes = ConstU32<0>;
 }
 
 parameter_types! {
-	pub const ReservedXcmpWeight: Weight = Weight::from_ref_time(WEIGHT_REF_TIME_PER_SECOND.saturating_div(4));
-	pub const ReservedDmpWeight: Weight = Weight::from_ref_time(WEIGHT_REF_TIME_PER_SECOND.saturating_div(4));
+	pub const ReservedXcmpWeight: Weight = Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_div(4), 0);
+	pub const ReservedDmpWeight: Weight = Weight::from_parts(WEIGHT_REF_TIME_PER_SECOND.saturating_div(4), 0);
 }
 
 parameter_types! {
@@ -157,6 +161,7 @@ impl Config for XcmConfig {
 	type UniversalAliases = Nothing;
 	type CallDispatcher = RuntimeCall;
 	type SafeCallFilter = Everything;
+	type Aliasers = Nothing;
 }
 
 #[frame_support::pallet]
@@ -174,7 +179,6 @@ pub mod mock_msg_queue {
 	impl<T: Config> Pallet<T> {}
 
 	#[pallet::pallet]
-	#[pallet::generate_store(pub(super) trait Store)]
 	#[pallet::without_storage_info]
 	pub struct Pallet<T>(_);
 
@@ -234,7 +238,7 @@ pub mod mock_msg_queue {
 				Ok(xcm) => {
 					let location = MultiLocation::new(1, X1(Parachain(sender.into())));
 					match T::XcmExecutor::execute_xcm(location, xcm, message_hash, max_weight) {
-						Outcome::Error(e) => (Err(e.clone()), Event::Fail(Some(hash), e)),
+						Outcome::Error(e) => (Err(e), Event::Fail(Some(hash), e)),
 						Outcome::Complete(w) => (Ok(w), Event::Success(Some(hash))),
 						// As far as the caller is concerned, this was dispatched without error, so
 						// we just report the weight used.
@@ -258,7 +262,7 @@ pub mod mock_msg_queue {
 				let _ = XcmpMessageFormat::decode(&mut data_ref)
 					.expect("Simulator encodes with versioned xcm format; qed");
 
-				let mut remaining_fragments = &data_ref[..];
+				let mut remaining_fragments = data_ref;
 				while !remaining_fragments.is_empty() {
 					if let Ok(xcm) =
 						VersionedXcm::<T::RuntimeCall>::decode(&mut remaining_fragments)
@@ -333,21 +337,20 @@ impl pallet_xcm::Config for Runtime {
 	type TrustedLockers = ();
 	type SovereignAccountOf = LocationToAccountId;
 	type MaxLockers = frame_support::traits::ConstU32<8>;
+	type MaxRemoteLockConsumers = frame_support::traits::ConstU32<0>;
+	type RemoteLockConsumerIdentifier = ();
 	type WeightInfo = pallet_xcm::TestWeightInfo;
 	#[cfg(feature = "runtime-benchmarks")]
 	type ReachableDest = ReachableDest;
+	type AdminOrigin = EnsureRoot<AccountId>;
 }
 
-type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Runtime>;
 type Block = frame_system::mocking::MockBlock<Runtime>;
 
 construct_runtime!(
-	pub enum Runtime where
-		Block = Block,
-		NodeBlock = Block,
-		UncheckedExtrinsic = UncheckedExtrinsic,
+	pub enum Runtime
 	{
-		System: frame_system::{Pallet, Call, Storage, Config, Event<T>},
+		System: frame_system::{Pallet, Call, Storage, Config<T>, Event<T>},
 		Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>},
 		MsgQueue: mock_msg_queue::{Pallet, Storage, Event<T>},
 		PolkadotXcm: pallet_xcm::{Pallet, Call, Event<T>, Origin},

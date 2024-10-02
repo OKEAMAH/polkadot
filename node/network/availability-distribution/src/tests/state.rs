@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -32,7 +32,7 @@ use futures_timer::Delay;
 use sc_network as network;
 use sc_network::{config as netconfig, config::RequestResponseConfig, IfDisconnected};
 use sp_core::{testing::TaskExecutor, traits::SpawnNamed};
-use sp_keystore::SyncCryptoStorePtr;
+use sp_keystore::KeystorePtr;
 
 use polkadot_node_network_protocol::{
 	jaeger,
@@ -83,7 +83,7 @@ pub struct TestState {
 	pub session_info: SessionInfo,
 	/// Cores per relay chain block.
 	pub cores: HashMap<Hash, Vec<CoreState>>,
-	pub keystore: SyncCryptoStorePtr,
+	pub keystore: KeystorePtr,
 }
 
 impl Default for TestState {
@@ -123,13 +123,13 @@ impl Default for TestState {
 						let (core, chunk) = OccupiedCoreBuilder {
 							group_responsible: GroupIndex(i as _),
 							para_id: *para_id,
-							relay_parent: relay_parent.clone(),
+							relay_parent: *relay_parent,
 						}
 						.build();
 						(CoreState::Occupied(core), chunk)
 					})
 					.unzip();
-				cores.insert(relay_child.clone(), p_cores);
+				cores.insert(*relay_child, p_cores);
 				// Skip chunks for our own group (won't get fetched):
 				let mut chunks_other_groups = p_chunks.into_iter();
 				chunks_other_groups.next();
@@ -176,12 +176,12 @@ impl TestState {
 				.zip(advanced)
 				.map(|(old, new)| ActiveLeavesUpdate {
 					activated: Some(ActivatedLeaf {
-						hash: new.clone(),
+						hash: *new,
 						number: 1,
 						status: LeafStatus::Fresh,
 						span: Arc::new(jaeger::Span::Disabled),
 					}),
-					deactivated: vec![old.clone()].into(),
+					deactivated: vec![*old].into(),
 				})
 				.collect::<Vec<_>>()
 		};
@@ -239,8 +239,7 @@ impl TestState {
 					let chunk = self
 						.chunks
 						.get_mut(&(candidate_hash, validator_index))
-						.map(Vec::pop)
-						.flatten()
+						.and_then(Vec::pop)
 						.flatten();
 					tx.send(chunk).expect("Receiver is expected to be alive");
 				},

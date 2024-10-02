@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -30,7 +30,7 @@ use futures::{channel::mpsc, FutureExt, StreamExt, TryFutureExt};
 
 use polkadot_node_network_protocol::authority_discovery::AuthorityDiscovery;
 use polkadot_node_subsystem_util::nesting_sender::NestingSender;
-use sp_keystore::SyncCryptoStorePtr;
+use sp_keystore::KeystorePtr;
 
 use polkadot_node_network_protocol::request_response::{incoming::IncomingRequestReceiver, v1};
 use polkadot_node_primitives::DISPUTE_WINDOW;
@@ -60,8 +60,8 @@ use self::sender::{DisputeSender, DisputeSenderMessage};
 
 /// ## The receiver [`DisputesReceiver`]
 ///
-/// The receiving side is implemented as `DisputesReceiver` and is run as a separate long running task within
-/// this subsystem ([`DisputesReceiver::run`]).
+/// The receiving side is implemented as `DisputesReceiver` and is run as a separate long running
+/// task within this subsystem ([`DisputesReceiver::run`]).
 ///
 /// Conceptually all the receiver has to do, is waiting for incoming requests which are passed in
 /// via a dedicated channel and forwarding them to the dispute coordinator via
@@ -101,8 +101,8 @@ const LOG_TARGET: &'static str = "parachain::dispute-distribution";
 
 /// Rate limit on the `receiver` side.
 ///
-/// If messages from one peer come in at a higher rate than every `RECEIVE_RATE_LIMIT` on average, we
-/// start dropping messages from that peer to enforce that limit.
+/// If messages from one peer come in at a higher rate than every `RECEIVE_RATE_LIMIT` on average,
+/// we start dropping messages from that peer to enforce that limit.
 pub const RECEIVE_RATE_LIMIT: Duration = Duration::from_millis(100);
 
 /// Rate limit on the `sender` side.
@@ -158,7 +158,7 @@ where
 {
 	/// Create a new instance of the dispute distribution.
 	pub fn new(
-		keystore: SyncCryptoStorePtr,
+		keystore: KeystorePtr,
 		req_receiver: IncomingRequestReceiver<v1::DisputeRequest>,
 		authority_discovery: AD,
 		metrics: Metrics,

@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -310,7 +310,8 @@ pub fn make_buffered_subsystem_context<M, S>(
 
 /// Test a subsystem, mocking the overseer
 ///
-/// Pass in two async closures: one mocks the overseer, the other runs the test from the perspective of a subsystem.
+/// Pass in two async closures: one mocks the overseer, the other runs the test from the perspective
+/// of a subsystem.
 ///
 /// Times out in 5 seconds.
 pub fn subsystem_test_harness<M, OverseerFactory, Overseer, TestFactory, Test>(
@@ -457,7 +458,6 @@ mod tests {
 			dummy_overseer_builder(spawner.clone(), AlwaysSupportsParachains, None)
 				.unwrap()
 				.replace_collator_protocol(|_| ForwardSubsystem(tx))
-				.leaves(vec![])
 				.build()
 				.unwrap();
 

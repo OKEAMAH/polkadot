@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,35 +19,36 @@ use crate::{
 	configuration::HostConfiguration,
 	initializer::SessionChangeNotification,
 	mock::{
-		new_test_ext, Configuration, MockGenesisConfig, ParaInclusion, Paras, ParasShared, System,
-		Test,
+		new_test_ext, Configuration, MockGenesisConfig, ParaInclusion, Paras, ParasShared,
+		Scheduler, System, Test,
 	},
 	paras::{ParaGenesisArgs, ParaKind},
 	paras_inherent::DisputedBitfield,
-	scheduler::AssignmentKind,
+	shared::AllowedRelayParentsTracker,
 };
+use primitives::{SignedAvailabilityBitfields, UncheckedSignedAvailabilityBitfields};
+
 use assert_matches::assert_matches;
 use frame_support::assert_noop;
-use futures::executor::block_on;
 use keyring::Sr25519Keyring;
+use parity_scale_codec::DecodeAll;
 use primitives::{
+	v5::{Assignment, ParasEntry},
 	BlockNumber, CandidateCommitments, CandidateDescriptor, CollatorId,
 	CompactStatement as Statement, Hash, SignedAvailabilityBitfield, SignedStatement,
-	UncheckedSignedAvailabilityBitfield, ValidationCode, ValidatorId, ValidityAttestation,
-	PARACHAIN_KEY_TYPE_ID,
+	ValidationCode, ValidatorId, ValidityAttestation, PARACHAIN_KEY_TYPE_ID,
 };
 use sc_keystore::LocalKeystore;
-use sp_keystore::{SyncCryptoStore, SyncCryptoStorePtr};
+use sp_keystore::{Keystore, KeystorePtr};
 use std::sync::Arc;
-use test_helpers::{
-	dummy_candidate_receipt, dummy_collator, dummy_collator_signature, dummy_hash,
-	dummy_validation_code,
-};
+use test_helpers::{dummy_collator, dummy_collator_signature, dummy_validation_code};
 
 fn default_config() -> HostConfiguration<BlockNumber> {
 	let mut config = HostConfiguration::default();
-	config.parathread_cores = 1;
-	config.max_code_size = 3;
+	config.on_demand_cores = 1;
+	config.max_code_size = 0b100000;
+	config.max_head_data_size = 0b100000;
+	config.group_rotation_frequency = u32::MAX;
 	config
 }
 
@@ -69,12 +70,19 @@ pub(crate) fn genesis_config(paras: Vec<(ParaId, ParaKind)>) -> MockGenesisConfi
 				.collect(),
 			..Default::default()
 		},
-		configuration: configuration::GenesisConfig {
-			config: default_config(),
-			..Default::default()
-		},
+		configuration: configuration::GenesisConfig { config: default_config() },
 		..Default::default()
 	}
+}
+
+fn default_allowed_relay_parent_tracker() -> AllowedRelayParentsTracker<Hash, BlockNumber> {
+	let mut allowed = AllowedRelayParentsTracker::default();
+
+	let relay_parent = System::parent_hash();
+	let parent_number = System::block_number().saturating_sub(1);
+
+	allowed.update(relay_parent, Hash::zero(), parent_number, 1);
+	allowed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,11 +111,11 @@ pub(crate) fn collator_sign_candidate(
 	assert!(candidate.descriptor().check_collator_signature().is_ok());
 }
 
-pub(crate) async fn back_candidate(
+pub(crate) fn back_candidate(
 	candidate: CommittedCandidateReceipt,
 	validators: &[Sr25519Keyring],
 	group: &[ValidatorIndex],
-	keystore: &SyncCryptoStorePtr,
+	keystore: &KeystorePtr,
 	signing_context: &SigningContext,
 	kind: BackingKind,
 ) -> BackedCandidate {
@@ -134,7 +142,6 @@ pub(crate) async fn back_candidate(
 			*val_idx,
 			&key.public().into(),
 		)
-		.await
 		.unwrap()
 		.unwrap()
 		.signature()
@@ -161,6 +168,17 @@ pub(crate) async fn back_candidate(
 	backed
 }
 
+pub(crate) fn run_to_block_default_notifications(to: BlockNumber, new_session: Vec<BlockNumber>) {
+	run_to_block(to, |b| {
+		new_session.contains(&b).then_some(SessionChangeNotification {
+			prev_config: Configuration::config(),
+			new_config: Configuration::config(),
+			session_index: ParasShared::session_index() + 1,
+			..Default::default()
+		})
+	});
+}
+
 pub(crate) fn run_to_block(
 	to: BlockNumber,
 	new_session: impl Fn(BlockNumber) -> Option<SessionChangeNotification<BlockNumber>>,
@@ -179,8 +197,8 @@ pub(crate) fn run_to_block(
 				&notification.new_config,
 				notification.validators.clone(),
 			);
-			Paras::initializer_on_new_session(&notification);
-			ParaInclusion::initializer_on_new_session(&notification);
+			let outgoing = Paras::initializer_on_new_session(&notification);
+			ParaInclusion::initializer_on_new_session(&notification, &outgoing);
 		}
 
 		System::on_finalize(b);
@@ -195,7 +213,7 @@ pub(crate) fn run_to_block(
 }
 
 pub(crate) fn expected_bits() -> usize {
-	Paras::parachains().len() + Configuration::config().parathread_cores as usize
+	Paras::parachains().len() + Configuration::config().on_demand_cores as usize
 }
 
 fn default_bitfield() -> AvailabilityBitfield {
@@ -222,8 +240,8 @@ pub(crate) fn validator_pubkeys(val_ids: &[Sr25519Keyring]) -> Vec<ValidatorId> 
 	val_ids.iter().map(|v| v.public().into()).collect()
 }
 
-pub(crate) async fn sign_bitfield(
-	keystore: &SyncCryptoStorePtr,
+pub(crate) fn sign_bitfield(
+	keystore: &KeystorePtr,
 	key: &Sr25519Keyring,
 	validator_index: ValidatorIndex,
 	bitfield: AvailabilityBitfield,
@@ -236,7 +254,6 @@ pub(crate) async fn sign_bitfield(
 		validator_index,
 		&key.public().into(),
 	)
-	.await
 	.unwrap()
 	.unwrap()
 }
@@ -296,12 +313,54 @@ impl TestCandidateBuilder {
 
 pub(crate) fn make_vdata_hash(para_id: ParaId) -> Option<Hash> {
 	let relay_parent_number = <frame_system::Pallet<Test>>::block_number() - 1;
+	make_vdata_hash_with_block_number(para_id, relay_parent_number)
+}
+
+fn make_vdata_hash_with_block_number(
+	para_id: ParaId,
+	relay_parent_number: BlockNumber,
+) -> Option<Hash> {
 	let persisted_validation_data = crate::util::make_persisted_validation_data::<Test>(
 		para_id,
 		relay_parent_number,
 		Default::default(),
 	)?;
 	Some(persisted_validation_data.hash())
+}
+
+/// Wrapper around `sanitize_bitfields` with less parameters.
+fn simple_sanitize_bitfields(
+	unchecked_bitfields: UncheckedSignedAvailabilityBitfields,
+	disputed_bitfield: DisputedBitfield,
+	expected_bits: usize,
+) -> SignedAvailabilityBitfields {
+	let parent_hash = frame_system::Pallet::<Test>::parent_hash();
+	let session_index = shared::Pallet::<Test>::session_index();
+	let validators = shared::Pallet::<Test>::active_validator_keys();
+
+	crate::paras_inherent::sanitize_bitfields::<Test>(
+		unchecked_bitfields,
+		disputed_bitfield,
+		expected_bits,
+		parent_hash,
+		session_index,
+		&validators,
+	)
+}
+/// Process a set of already sanitized bitfields.
+pub(crate) fn process_bitfields(
+	expected_bits: usize,
+	signed_bitfields: SignedAvailabilityBitfields,
+	core_lookup: impl Fn(CoreIndex) -> Option<ParaId>,
+) -> Vec<(CoreIndex, CandidateHash)> {
+	let validators = shared::Pallet::<Test>::active_validator_keys();
+
+	ParaInclusion::update_pending_availability_and_get_freed_cores::<_>(
+		expected_bits,
+		&validators[..],
+		signed_bitfields,
+		core_lookup,
+	)
 }
 
 #[test]
@@ -384,9 +443,9 @@ fn bitfield_checks() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -410,222 +469,97 @@ fn bitfield_checks() {
 			_ => panic!("out of bounds for testing"),
 		};
 
-		// mark all candidates as pending availability
-		let set_pending_av = || {
-			for (p_id, _) in paras {
-				let receipt = dummy_candidate_receipt(dummy_hash());
-				PendingAvailability::<Test>::insert(
-					p_id,
-					CandidatePendingAvailability {
-						availability_votes: default_availability_votes(),
-						core: CoreIndex(0),
-						hash: receipt.hash(),
-						descriptor: receipt.descriptor,
-						backers: BitVec::default(),
-						relay_parent_number: BlockNumber::from(0_u32),
-						backed_in_number: BlockNumber::from(0_u32),
-						backing_group: GroupIndex(0),
-					},
-				)
-			}
-		};
-
 		// too many bits in bitfield
 		{
 			let mut bare_bitfield = default_bitfield();
 			bare_bitfield.0.push(false);
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed.into()],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::WrongBitfieldSize)
+			let checked_bitfields = simple_sanitize_bitfields(
+				vec![signed.into()],
+				DisputedBitfield::zeros(expected_bits()),
+				expected_bits(),
+			);
+			assert_eq!(
+				checked_bitfields.len(),
+				0,
+				"Bitfield has wrong size, it should have been filtered."
 			);
 		}
 
 		// not enough bits
 		{
 			let bare_bitfield = default_bitfield();
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
-
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits() + 1,
-					vec![signed.into()],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::WrongBitfieldSize)
 			);
-		}
 
-		// duplicate.
-		{
-			set_pending_av.clone()();
-			let back_core_0_bitfield = {
-				let mut b = default_bitfield();
-				b.0.set(0, true);
-				b
-			};
-			let signed: UncheckedSignedAvailabilityBitfield = block_on(sign_bitfield(
-				&keystore,
-				&validators[0],
-				ValidatorIndex(0),
-				back_core_0_bitfield,
-				&signing_context,
-			))
-			.into();
-
+			let checked_bitfields = simple_sanitize_bitfields(
+				vec![signed.into()],
+				DisputedBitfield::zeros(expected_bits()),
+				expected_bits() + 1,
+			);
 			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
+				checked_bitfields.len(),
+				0,
+				"Bitfield has wrong size, it should have been filtered."
 			);
-
-			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
-			// valid bitfield.
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed.clone(), signed],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::UnsortedOrDuplicateValidatorIndices)
-			);
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			// clean up
-			#[allow(deprecated)]
-			PendingAvailability::<Test>::remove_all(None);
-		}
-
-		// out of order.
-		{
-			set_pending_av.clone()();
-			let back_core_0_bitfield = {
-				let mut b = default_bitfield();
-				b.0.set(0, true);
-				b
-			};
-			let signed_0 = block_on(sign_bitfield(
-				&keystore,
-				&validators[0],
-				ValidatorIndex(0),
-				back_core_0_bitfield.clone(),
-				&signing_context,
-			))
-			.into();
-
-			let signed_1 = block_on(sign_bitfield(
-				&keystore,
-				&validators[1],
-				ValidatorIndex(1),
-				back_core_0_bitfield,
-				&signing_context,
-			))
-			.into();
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
-			// valid bitfield because `signed_0` will get skipped for being out of order.
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed_1, signed_0],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::UnsortedOrDuplicateValidatorIndices)
-			);
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			#[allow(deprecated)]
-			PendingAvailability::<Test>::remove_all(None);
 		}
 
 		// non-pending bit set.
 		{
 			let mut bare_bitfield = default_bitfield();
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
+			// valid bitfield because `signed_0` will get skipped for being out of order.
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(x) => { assert!(x.is_empty())});
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 
 		// empty bitfield signed: always ok, but kind of useless.
 		{
 			let bare_bitfield = default_bitfield();
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
-
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			);
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(x) => { assert!(x.is_empty())});
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 
 		// bitfield signed with pending bit signed.
@@ -651,21 +585,23 @@ fn bitfield_checks() {
 			PendingAvailabilityCommitments::<Test>::insert(chain_a, default_candidate.commitments);
 
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(v) => { assert!(v.is_empty())} );
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 
 			<PendingAvailability<Test>>::remove(chain_a);
 			PendingAvailabilityCommitments::<Test>::remove(chain_a);
@@ -693,24 +629,33 @@ fn bitfield_checks() {
 			);
 
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			// no core is freed
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(v) => { assert!(v.is_empty()) });
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			// no core is freed
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 	});
+}
+
+#[test]
+fn availability_threshold_is_supermajority() {
+	assert_eq!(3, availability_threshold(4));
+	assert_eq!(5, availability_threshold(6));
+	assert_eq!(7, availability_threshold(9));
 }
 
 #[test]
@@ -731,9 +676,9 @@ fn supermajority_bitfields_trigger_availability() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -836,31 +781,29 @@ fn supermajority_bitfields_trigger_availability() {
 				};
 
 				Some(
-					block_on(sign_bitfield(
+					sign_bitfield(
 						&keystore,
 						key,
 						ValidatorIndex(i as _),
 						to_sign,
 						&signing_context,
-					))
+					)
 					.into(),
 				)
 			})
-			.collect();
+			.collect::<Vec<_>>();
+
+		let old_len = signed_bitfields.len();
+		let checked_bitfields = simple_sanitize_bitfields(
+			signed_bitfields,
+			DisputedBitfield::zeros(expected_bits()),
+			expected_bits(),
+		);
+		assert_eq!(checked_bitfields.len(), old_len, "No bitfields should have been filtered!");
 
 		// only chain A's core is freed.
-		assert_matches!(
-			ParaInclusion::process_bitfields(
-				expected_bits(),
-				signed_bitfields,
-				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			),
-			Ok(v) => {
-				assert_eq!(vec![(CoreIndex(0), candidate_a.hash())], v);
-			}
-		);
+		let v = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+		assert_eq!(vec![(CoreIndex(0), candidate_a.hash())], v);
 
 		// chain A had 4 signing off, which is >= threshold.
 		// chain B has 3 signing off, which is < threshold.
@@ -923,9 +866,9 @@ fn candidate_checks() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -953,28 +896,32 @@ fn candidate_checks() {
 			.map(|m| m.into_iter().map(ValidatorIndex).collect::<Vec<_>>())
 		};
 
-		let thread_collator: CollatorId = Sr25519Keyring::Two.public().into();
+		// When processing candidates, we compute the group index from scheduler.
+		let validator_groups = vec![
+			vec![ValidatorIndex(0), ValidatorIndex(1)],
+			vec![ValidatorIndex(2), ValidatorIndex(3)],
+			vec![ValidatorIndex(4)],
+		];
+		Scheduler::set_validator_groups(validator_groups);
 
+		let entry_ttl = 10_000;
+		let thread_collator: CollatorId = Sr25519Keyring::Two.public().into();
 		let chain_a_assignment = CoreAssignment {
 			core: CoreIndex::from(0),
-			para_id: chain_a,
-			kind: AssignmentKind::Parachain,
-			group_idx: GroupIndex::from(0),
+			paras_entry: ParasEntry::new(Assignment::new(chain_a), entry_ttl),
 		};
 
 		let chain_b_assignment = CoreAssignment {
 			core: CoreIndex::from(1),
-			para_id: chain_b,
-			kind: AssignmentKind::Parachain,
-			group_idx: GroupIndex::from(1),
+			paras_entry: ParasEntry::new(Assignment::new(chain_b), entry_ttl),
 		};
 
 		let thread_a_assignment = CoreAssignment {
 			core: CoreIndex::from(2),
-			para_id: thread_a,
-			kind: AssignmentKind::Parathread(thread_collator.clone(), 0),
-			group_idx: GroupIndex::from(2),
+			paras_entry: ParasEntry::new(Assignment::new(thread_a), entry_ttl),
 		};
+
+		let allowed_relay_parents = default_allowed_relay_parent_tracker();
 
 		// unscheduled candidate.
 		{
@@ -989,18 +936,18 @@ fn candidate_checks() {
 			.build();
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_b_assignment.clone()],
 					&group_validators,
@@ -1034,28 +981,28 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_b);
 
-			let backed_a = block_on(back_candidate(
+			let backed_a = back_candidate(
 				candidate_a,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
-			let backed_b = block_on(back_candidate(
+			let backed_b = back_candidate(
 				candidate_b,
 				&validators,
 				group_validators(GroupIndex::from(1)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			// out-of-order manifests as unscheduled.
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed_b, backed_a],
 					vec![chain_a_assignment.clone(), chain_b_assignment.clone()],
 					&group_validators,
@@ -1077,18 +1024,18 @@ fn candidate_checks() {
 			.build();
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Lacking,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1097,12 +1044,12 @@ fn candidate_checks() {
 			);
 		}
 
-		// candidate not in parent context.
+		// one of candidates is not based on allowed relay parent.
 		{
 			let wrong_parent_hash = Hash::repeat_byte(222);
 			assert!(System::parent_hash() != wrong_parent_hash);
 
-			let mut candidate = TestCandidateBuilder {
+			let mut candidate_a = TestCandidateBuilder {
 				para_id: chain_a,
 				relay_parent: wrong_parent_hash,
 				pov_hash: Hash::repeat_byte(1),
@@ -1110,64 +1057,47 @@ fn candidate_checks() {
 				..Default::default()
 			}
 			.build();
-			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
-				candidate,
-				&validators,
-				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
-				&keystore,
-				&signing_context,
-				BackingKind::Threshold,
-			));
-
-			assert_noop!(
-				ParaInclusion::process_candidates(
-					Default::default(),
-					vec![backed],
-					vec![chain_a_assignment.clone()],
-					&group_validators,
-				),
-				Error::<Test>::CandidateNotInParentContext
-			);
-		}
-
-		// candidate has wrong collator.
-		{
-			let mut candidate = TestCandidateBuilder {
-				para_id: thread_a,
+			let mut candidate_b = TestCandidateBuilder {
+				para_id: chain_b,
 				relay_parent: System::parent_hash(),
-				pov_hash: Hash::repeat_byte(1),
-				persisted_validation_data_hash: make_vdata_hash(thread_a).unwrap(),
+				pov_hash: Hash::repeat_byte(2),
+				persisted_validation_data_hash: make_vdata_hash(chain_b).unwrap(),
 				hrmp_watermark: RELAY_PARENT_NUM,
 				..Default::default()
 			}
 			.build();
 
-			assert!(CollatorId::from(Sr25519Keyring::One.public()) != thread_collator);
-			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
+			collator_sign_candidate(Sr25519Keyring::One, &mut candidate_a);
 
-			let backed = block_on(back_candidate(
-				candidate,
+			collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_b);
+
+			let backed_a = back_candidate(
+				candidate_a,
 				&validators,
-				group_validators(GroupIndex::from(2)).unwrap().as_ref(),
+				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
+
+			let backed_b = back_candidate(
+				candidate_b,
+				&validators,
+				group_validators(GroupIndex::from(1)).unwrap().as_ref(),
+				&keystore,
+				&signing_context,
+				BackingKind::Threshold,
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
-					vec![backed],
-					vec![
-						chain_a_assignment.clone(),
-						chain_b_assignment.clone(),
-						thread_a_assignment.clone(),
-					],
+					&allowed_relay_parents,
+					vec![backed_b, backed_a],
+					vec![chain_a_assignment.clone(), chain_b_assignment.clone()],
 					&group_validators,
 				),
-				Error::<Test>::WrongCollator,
+				Error::<Test>::DisallowedRelayParent
 			);
 		}
 
@@ -1189,18 +1119,18 @@ fn candidate_checks() {
 			// change the candidate after signing.
 			candidate.descriptor.pov_hash = Hash::repeat_byte(2);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(2)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![thread_a_assignment.clone()],
 					&group_validators,
@@ -1223,14 +1153,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			let candidate = TestCandidateBuilder::default().build();
 			<PendingAvailability<Test>>::insert(
@@ -1250,7 +1180,7 @@ fn candidate_checks() {
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1279,18 +1209,18 @@ fn candidate_checks() {
 			// this is not supposed to happen
 			<PendingAvailabilityCommitments<Test>>::insert(&chain_a, candidate.commitments.clone());
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1316,14 +1246,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			{
 				let cfg = Configuration::config();
@@ -1334,7 +1264,7 @@ fn candidate_checks() {
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1357,18 +1287,18 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_eq!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1392,18 +1322,18 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1427,18 +1357,18 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
-					Default::default(),
+					&allowed_relay_parents,
 					vec![backed],
 					vec![chain_a_assignment.clone()],
 					&group_validators,
@@ -1470,9 +1400,9 @@ fn backing_works() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1500,27 +1430,30 @@ fn backing_works() {
 			.map(|vs| vs.into_iter().map(ValidatorIndex).collect::<Vec<_>>())
 		};
 
-		let thread_collator: CollatorId = Sr25519Keyring::Two.public().into();
+		// When processing candidates, we compute the group index from scheduler.
+		let validator_groups = vec![
+			vec![ValidatorIndex(0), ValidatorIndex(1)],
+			vec![ValidatorIndex(2), ValidatorIndex(3)],
+			vec![ValidatorIndex(4)],
+		];
+		Scheduler::set_validator_groups(validator_groups);
 
+		let allowed_relay_parents = default_allowed_relay_parent_tracker();
+
+		let entry_ttl = 10_000;
 		let chain_a_assignment = CoreAssignment {
 			core: CoreIndex::from(0),
-			para_id: chain_a,
-			kind: AssignmentKind::Parachain,
-			group_idx: GroupIndex::from(0),
+			paras_entry: ParasEntry::new(Assignment::new(chain_a), entry_ttl),
 		};
 
 		let chain_b_assignment = CoreAssignment {
 			core: CoreIndex::from(1),
-			para_id: chain_b,
-			kind: AssignmentKind::Parachain,
-			group_idx: GroupIndex::from(1),
+			paras_entry: ParasEntry::new(Assignment::new(chain_b), entry_ttl),
 		};
 
 		let thread_a_assignment = CoreAssignment {
 			core: CoreIndex::from(2),
-			para_id: thread_a,
-			kind: AssignmentKind::Parathread(thread_collator.clone(), 0),
-			group_idx: GroupIndex::from(2),
+			paras_entry: ParasEntry::new(Assignment::new(thread_a), entry_ttl),
 		};
 
 		let mut candidate_a = TestCandidateBuilder {
@@ -1556,34 +1489,34 @@ fn backing_works() {
 		.build();
 		collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_c);
 
-		let backed_a = block_on(back_candidate(
+		let backed_a = back_candidate(
 			candidate_a.clone(),
 			&validators,
 			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
-		let backed_b = block_on(back_candidate(
+		let backed_b = back_candidate(
 			candidate_b.clone(),
 			&validators,
 			group_validators(GroupIndex::from(1)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
-		let backed_c = block_on(back_candidate(
+		let backed_c = back_candidate(
 			candidate_c.clone(),
 			&validators,
 			group_validators(GroupIndex::from(2)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
-		let backed_candidates = vec![backed_a, backed_b, backed_c];
+		let backed_candidates = vec![backed_a.clone(), backed_b.clone(), backed_c];
 		let get_backing_group_idx = {
 			// the order defines the group implicitly for this test case
 			let backed_candidates_with_groups = backed_candidates
@@ -1607,7 +1540,7 @@ fn backing_works() {
 			core_indices: occupied_cores,
 			candidate_receipt_with_backing_validator_indices,
 		} = ParaInclusion::process_candidates(
-			Default::default(),
+			&allowed_relay_parents,
 			backed_candidates.clone(),
 			vec![
 				chain_a_assignment.clone(),
@@ -1620,7 +1553,11 @@ fn backing_works() {
 
 		assert_eq!(
 			occupied_cores,
-			vec![CoreIndex::from(0), CoreIndex::from(1), CoreIndex::from(2)]
+			vec![
+				(CoreIndex::from(0), chain_a),
+				(CoreIndex::from(1), chain_b),
+				(CoreIndex::from(2), thread_a)
+			]
 		);
 
 		// Transform the votes into the setup we expect
@@ -1750,9 +1687,9 @@ fn can_include_candidate_with_ok_code_upgrade() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1778,11 +1715,21 @@ fn can_include_candidate_with_ok_code_upgrade() {
 			.map(|vs| vs.into_iter().map(ValidatorIndex).collect::<Vec<_>>())
 		};
 
+		// When processing candidates, we compute the group index from scheduler.
+		let validator_groups = vec![vec![
+			ValidatorIndex(0),
+			ValidatorIndex(1),
+			ValidatorIndex(2),
+			ValidatorIndex(3),
+			ValidatorIndex(4),
+		]];
+		Scheduler::set_validator_groups(validator_groups);
+
+		let allowed_relay_parents = default_allowed_relay_parent_tracker();
+		let entry_ttl = 10_000;
 		let chain_a_assignment = CoreAssignment {
 			core: CoreIndex::from(0),
-			para_id: chain_a,
-			kind: AssignmentKind::Parachain,
-			group_idx: GroupIndex::from(0),
+			paras_entry: ParasEntry::new(Assignment::new(chain_a), entry_ttl),
 		};
 
 		let mut candidate_a = TestCandidateBuilder {
@@ -1797,25 +1744,25 @@ fn can_include_candidate_with_ok_code_upgrade() {
 		.build();
 		collator_sign_candidate(Sr25519Keyring::One, &mut candidate_a);
 
-		let backed_a = block_on(back_candidate(
+		let backed_a = back_candidate(
 			candidate_a.clone(),
 			&validators,
 			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
 		let ProcessedCandidates { core_indices: occupied_cores, .. } =
 			ParaInclusion::process_candidates(
-				Default::default(),
+				&allowed_relay_parents,
 				vec![backed_a],
 				vec![chain_a_assignment.clone()],
 				&group_validators,
 			)
 			.expect("candidates scheduled, in order, and backed");
 
-		assert_eq!(occupied_cores, vec![CoreIndex::from(0)]);
+		assert_eq!(occupied_cores, vec![(CoreIndex::from(0), chain_a)]);
 
 		let backers = {
 			let num_backers = minimum_backing_votes(group_validators(GroupIndex(0)).unwrap().len());
@@ -1842,6 +1789,212 @@ fn can_include_candidate_with_ok_code_upgrade() {
 }
 
 #[test]
+fn check_allowed_relay_parents() {
+	let chain_a = ParaId::from(1);
+	let chain_b = ParaId::from(2);
+	let thread_a = ParaId::from(3);
+
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
+	let validators = vec![
+		Sr25519Keyring::Alice,
+		Sr25519Keyring::Bob,
+		Sr25519Keyring::Charlie,
+		Sr25519Keyring::Dave,
+		Sr25519Keyring::Ferdie,
+	];
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
+	for validator in validators.iter() {
+		Keystore::sr25519_generate_new(
+			&*keystore,
+			PARACHAIN_KEY_TYPE_ID,
+			Some(&validator.to_seed()),
+		)
+		.unwrap();
+	}
+	let validator_public = validator_pubkeys(&validators);
+	let mut config = genesis_config(paras);
+	config.configuration.config.group_rotation_frequency = 1;
+
+	new_test_ext(config).execute_with(|| {
+		shared::Pallet::<Test>::set_active_validators_ascending(validator_public.clone());
+		shared::Pallet::<Test>::set_session_index(5);
+
+		run_to_block(5, |_| None);
+
+		let group_validators = |group_index: GroupIndex| {
+			match group_index {
+				group_index if group_index == GroupIndex::from(0) => Some(vec![0, 1]),
+				group_index if group_index == GroupIndex::from(1) => Some(vec![2, 3]),
+				group_index if group_index == GroupIndex::from(2) => Some(vec![4]),
+				_ => panic!("Group index out of bounds for 2 parachains and 1 parathread core"),
+			}
+			.map(|vs| vs.into_iter().map(ValidatorIndex).collect::<Vec<_>>())
+		};
+
+		// When processing candidates, we compute the group index from scheduler.
+		let validator_groups = vec![
+			vec![ValidatorIndex(0), ValidatorIndex(1)],
+			vec![ValidatorIndex(2), ValidatorIndex(3)],
+			vec![ValidatorIndex(4)],
+		];
+		Scheduler::set_validator_groups(validator_groups);
+
+		// Base each candidate on one of allowed relay parents.
+		//
+		// Note that the group rotation frequency is set to 1 above,
+		// which means groups shift at each relay parent.
+		//
+		// For example, candidate `a` is based on block 1,
+		// thus it will be included in block 2, its group index is
+		// core = 0 shifted 2 times: one for group rotation and one for
+		// fetching the group assigned to the next block.
+		//
+		// Candidates `b` and `c` are constructed accordingly.
+
+		let relay_parent_a = (1, Hash::repeat_byte(0x1));
+		let relay_parent_b = (2, Hash::repeat_byte(0x2));
+		let relay_parent_c = (3, Hash::repeat_byte(0x3));
+
+		let mut allowed_relay_parents = AllowedRelayParentsTracker::default();
+		let max_ancestry_len = 3;
+		allowed_relay_parents.update(
+			relay_parent_a.1,
+			Hash::zero(),
+			relay_parent_a.0,
+			max_ancestry_len,
+		);
+		allowed_relay_parents.update(
+			relay_parent_b.1,
+			Hash::zero(),
+			relay_parent_b.0,
+			max_ancestry_len,
+		);
+		allowed_relay_parents.update(
+			relay_parent_c.1,
+			Hash::zero(),
+			relay_parent_c.0,
+			max_ancestry_len,
+		);
+
+		let chain_a_assignment = CoreAssignment {
+			core: CoreIndex::from(0),
+			paras_entry: ParasEntry {
+				assignment: Assignment { para_id: chain_a },
+				availability_timeouts: 0,
+				ttl: 5,
+			},
+		};
+
+		let chain_b_assignment = CoreAssignment {
+			core: CoreIndex::from(1),
+			paras_entry: ParasEntry {
+				assignment: Assignment { para_id: chain_b },
+				availability_timeouts: 0,
+				ttl: 5,
+			},
+		};
+
+		let thread_a_assignment = CoreAssignment {
+			core: CoreIndex::from(2),
+			paras_entry: ParasEntry::new(Assignment::new(thread_a), 5),
+		};
+
+		let mut candidate_a = TestCandidateBuilder {
+			para_id: chain_a,
+			relay_parent: relay_parent_a.1,
+			pov_hash: Hash::repeat_byte(1),
+			persisted_validation_data_hash: make_vdata_hash_with_block_number(
+				chain_a,
+				relay_parent_a.0,
+			)
+			.unwrap(),
+			hrmp_watermark: relay_parent_a.0,
+			..Default::default()
+		}
+		.build();
+		collator_sign_candidate(Sr25519Keyring::One, &mut candidate_a);
+		let signing_context_a = SigningContext { parent_hash: relay_parent_a.1, session_index: 5 };
+
+		let mut candidate_b = TestCandidateBuilder {
+			para_id: chain_b,
+			relay_parent: relay_parent_b.1,
+			pov_hash: Hash::repeat_byte(2),
+			persisted_validation_data_hash: make_vdata_hash_with_block_number(
+				chain_b,
+				relay_parent_b.0,
+			)
+			.unwrap(),
+			hrmp_watermark: relay_parent_b.0,
+			..Default::default()
+		}
+		.build();
+		collator_sign_candidate(Sr25519Keyring::One, &mut candidate_b);
+		let signing_context_b = SigningContext { parent_hash: relay_parent_b.1, session_index: 5 };
+
+		let mut candidate_c = TestCandidateBuilder {
+			para_id: thread_a,
+			relay_parent: relay_parent_c.1,
+			pov_hash: Hash::repeat_byte(3),
+			persisted_validation_data_hash: make_vdata_hash_with_block_number(
+				thread_a,
+				relay_parent_c.0,
+			)
+			.unwrap(),
+			hrmp_watermark: relay_parent_c.0,
+			..Default::default()
+		}
+		.build();
+		collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_c);
+		let signing_context_c = SigningContext { parent_hash: relay_parent_c.1, session_index: 5 };
+
+		let backed_a = back_candidate(
+			candidate_a.clone(),
+			&validators,
+			group_validators(GroupIndex::from(2)).unwrap().as_ref(),
+			&keystore,
+			&signing_context_a,
+			BackingKind::Threshold,
+		);
+
+		let backed_b = back_candidate(
+			candidate_b.clone(),
+			&validators,
+			group_validators(GroupIndex::from(1)).unwrap().as_ref(),
+			&keystore,
+			&signing_context_b,
+			BackingKind::Threshold,
+		);
+
+		let backed_c = back_candidate(
+			candidate_c.clone(),
+			&validators,
+			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
+			&keystore,
+			&signing_context_c,
+			BackingKind::Threshold,
+		);
+
+		let backed_candidates = vec![backed_a, backed_b, backed_c];
+
+		ParaInclusion::process_candidates(
+			&allowed_relay_parents,
+			backed_candidates.clone(),
+			vec![
+				chain_a_assignment.clone(),
+				chain_b_assignment.clone(),
+				thread_a_assignment.clone(),
+			],
+			&group_validators,
+		)
+		.expect("candidates scheduled, in order, and backed");
+	});
+}
+
+#[test]
 fn session_change_wipes() {
 	let chain_a = ParaId::from(1_u32);
 	let chain_b = ParaId::from(2_u32);
@@ -1859,9 +2012,9 @@ fn session_change_wipes() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1966,5 +2119,166 @@ fn session_change_wipes() {
 		assert!(<AvailabilityBitfields<Test>>::iter().collect::<Vec<_>>().is_empty());
 		assert!(<PendingAvailability<Test>>::iter().collect::<Vec<_>>().is_empty());
 		assert!(<PendingAvailabilityCommitments<Test>>::iter().collect::<Vec<_>>().is_empty());
+	});
+}
+
+/// Assert that the encoding of a known `AggregateMessageOrigin` did not change.
+#[test]
+fn aggregate_origin_decode_regression_check() {
+	let ump = AggregateMessageOrigin::Ump(UmpQueueId::Para(u32::MAX.into()));
+	let raw = (0u8, 0u8, u32::MAX).encode();
+	let decoded = AggregateMessageOrigin::decode_all(&mut &raw[..]);
+	assert_eq!(decoded, Ok(ump), "Migration needed for AggregateMessageOrigin");
+}
+
+#[test]
+fn para_upgrade_delay_scheduled_from_inclusion() {
+	let chain_a = ParaId::from(1_u32);
+
+	// The block number of the relay-parent for testing.
+	const RELAY_PARENT_NUM: BlockNumber = 4;
+
+	let paras = vec![(chain_a, ParaKind::Parachain)];
+	let validators = vec![
+		Sr25519Keyring::Alice,
+		Sr25519Keyring::Bob,
+		Sr25519Keyring::Charlie,
+		Sr25519Keyring::Dave,
+		Sr25519Keyring::Ferdie,
+	];
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
+	for validator in validators.iter() {
+		Keystore::sr25519_generate_new(
+			&*keystore,
+			PARACHAIN_KEY_TYPE_ID,
+			Some(&validator.to_seed()),
+		)
+		.unwrap();
+	}
+	let validator_public = validator_pubkeys(&validators);
+
+	new_test_ext(genesis_config(paras)).execute_with(|| {
+		shared::Pallet::<Test>::set_active_validators_ascending(validator_public.clone());
+		shared::Pallet::<Test>::set_session_index(5);
+
+		let new_validation_code: ValidationCode = vec![1, 2, 3, 4, 5].into();
+		let new_validation_code_hash = new_validation_code.hash();
+
+		// Otherwise upgrade is no-op.
+		assert_ne!(new_validation_code, dummy_validation_code());
+
+		run_to_block(5, |_| None);
+
+		let signing_context =
+			SigningContext { parent_hash: System::parent_hash(), session_index: 5 };
+
+		let group_validators = |group_index: GroupIndex| {
+			match group_index {
+				group_index if group_index == GroupIndex::from(0) => Some(vec![0, 1, 2, 3, 4]),
+				_ => panic!("Group index out of bounds for 1 parachain"),
+			}
+			.map(|vs| vs.into_iter().map(ValidatorIndex).collect::<Vec<_>>())
+		};
+
+		// When processing candidates, we compute the group index from scheduler.
+		let validator_groups = vec![vec![
+			ValidatorIndex(0),
+			ValidatorIndex(1),
+			ValidatorIndex(2),
+			ValidatorIndex(3),
+			ValidatorIndex(4),
+		]];
+		Scheduler::set_validator_groups(validator_groups);
+
+		let core_lookup = |core| match core {
+			core if core == CoreIndex::from(0) => Some(chain_a),
+			_ => None,
+		};
+
+		let allowed_relay_parents = default_allowed_relay_parent_tracker();
+
+		let chain_a_assignment = CoreAssignment {
+			core: CoreIndex::from(0),
+			paras_entry: ParasEntry {
+				assignment: Assignment { para_id: chain_a },
+				availability_timeouts: 0,
+				ttl: 5,
+			},
+		};
+
+		let mut candidate_a = TestCandidateBuilder {
+			para_id: chain_a,
+			relay_parent: System::parent_hash(),
+			pov_hash: Hash::repeat_byte(1),
+			persisted_validation_data_hash: make_vdata_hash(chain_a).unwrap(),
+			new_validation_code: Some(new_validation_code.clone()),
+			hrmp_watermark: RELAY_PARENT_NUM,
+			..Default::default()
+		}
+		.build();
+		collator_sign_candidate(Sr25519Keyring::One, &mut candidate_a);
+
+		let backed_a = back_candidate(
+			candidate_a.clone(),
+			&validators,
+			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
+			&keystore,
+			&signing_context,
+			BackingKind::Threshold,
+		);
+
+		let ProcessedCandidates { core_indices: occupied_cores, .. } =
+			ParaInclusion::process_candidates(
+				&allowed_relay_parents,
+				vec![backed_a],
+				vec![chain_a_assignment.clone()],
+				&group_validators,
+			)
+			.expect("candidates scheduled, in order, and backed");
+
+		assert_eq!(occupied_cores, vec![(CoreIndex::from(0), chain_a)]);
+
+		// Run a couple of blocks before the inclusion.
+		run_to_block(7, |_| None);
+
+		let mut bare_bitfield = default_bitfield();
+		*bare_bitfield.0.get_mut(0).unwrap() = true;
+
+		let signed_bitfields = validators
+			.iter()
+			.enumerate()
+			.map(|(i, key)| {
+				sign_bitfield(
+					&keystore,
+					key,
+					ValidatorIndex(i as _),
+					bare_bitfield.clone(),
+					&signing_context,
+				)
+				.into()
+			})
+			.collect::<Vec<_>>();
+
+		let checked_bitfields = simple_sanitize_bitfields(
+			signed_bitfields,
+			DisputedBitfield::zeros(expected_bits()),
+			expected_bits(),
+		);
+
+		let v = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+		assert_eq!(vec![(CoreIndex(0), candidate_a.hash())], v);
+
+		assert!(<PendingAvailability<Test>>::get(&chain_a).is_none());
+		assert!(<PendingAvailabilityCommitments<Test>>::get(&chain_a).is_none());
+
+		let active_vote_state = paras::Pallet::<Test>::active_vote_state(&new_validation_code_hash)
+			.expect("prechecking must be initiated");
+
+		let cause = &active_vote_state.causes()[0];
+		// Upgrade block is the block of inclusion, not candidate's parent.
+		assert_matches!(cause,
+			paras::PvfCheckCause::Upgrade { id, included_at }
+				if id == &chain_a && included_at == &7
+		);
 	});
 }

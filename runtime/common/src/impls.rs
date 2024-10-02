@@ -1,4 +1,4 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -102,40 +102,39 @@ pub fn era_payout(
 mod tests {
 	use super::*;
 	use frame_support::{
-		dispatch::DispatchClass, parameter_types, traits::FindAuthor, weights::Weight, PalletId,
+		dispatch::DispatchClass,
+		parameter_types,
+		traits::{ConstU32, FindAuthor},
+		weights::Weight,
+		PalletId,
 	};
 	use frame_system::limits;
 	use primitives::AccountId;
-	use sp_core::H256;
+	use sp_core::{ConstU64, H256};
 	use sp_runtime::{
-		testing::Header,
 		traits::{BlakeTwo256, IdentityLookup},
-		Perbill,
+		BuildStorage, Perbill,
 	};
 
-	type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
 	type Block = frame_system::mocking::MockBlock<Test>;
 	const TEST_ACCOUNT: AccountId = AccountId::new([1; 32]);
 
 	frame_support::construct_runtime!(
-		pub enum Test where
-			Block = Block,
-			NodeBlock = Block,
-			UncheckedExtrinsic = UncheckedExtrinsic,
+		pub enum Test
 		{
-			System: frame_system::{Pallet, Call, Config, Storage, Event<T>},
+			System: frame_system::{Pallet, Call, Config<T>, Storage, Event<T>},
 			Authorship: pallet_authorship::{Pallet, Storage},
 			Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>},
-			Treasury: pallet_treasury::{Pallet, Call, Storage, Config, Event<T>},
+			Treasury: pallet_treasury::{Pallet, Call, Storage, Config<T>, Event<T>},
 		}
 	);
 
 	parameter_types! {
 		pub const BlockHashCount: u64 = 250;
 		pub BlockWeights: limits::BlockWeights = limits::BlockWeights::builder()
-			.base_block(Weight::from_ref_time(10))
+			.base_block(Weight::from_parts(10, 0))
 			.for_class(DispatchClass::all(), |weight| {
-				weight.base_extrinsic = Weight::from_ref_time(100);
+				weight.base_extrinsic = Weight::from_parts(100, 0);
 			})
 			.for_class(DispatchClass::non_mandatory(), |weight| {
 				weight.max_total = Some(Weight::from_parts(1024, u64::MAX));
@@ -148,14 +147,13 @@ mod tests {
 	impl frame_system::Config for Test {
 		type BaseCallFilter = frame_support::traits::Everything;
 		type RuntimeOrigin = RuntimeOrigin;
-		type Index = u64;
-		type BlockNumber = u64;
+		type Nonce = u64;
 		type RuntimeCall = RuntimeCall;
 		type Hash = H256;
 		type Hashing = BlakeTwo256;
 		type AccountId = AccountId;
 		type Lookup = IdentityLookup<Self::AccountId>;
-		type Header = Header;
+		type Block = Block;
 		type RuntimeEvent = RuntimeEvent;
 		type BlockHashCount = BlockHashCount;
 		type BlockLength = BlockLength;
@@ -176,12 +174,16 @@ mod tests {
 		type Balance = u64;
 		type RuntimeEvent = RuntimeEvent;
 		type DustRemoval = ();
-		type ExistentialDeposit = ();
+		type ExistentialDeposit = ConstU64<1>;
 		type AccountStore = System;
 		type MaxLocks = ();
 		type MaxReserves = ();
 		type ReserveIdentifier = [u8; 8];
 		type WeightInfo = ();
+		type RuntimeHoldReason = RuntimeHoldReason;
+		type FreezeIdentifier = ();
+		type MaxHolds = ConstU32<1>;
+		type MaxFreezes = ConstU32<1>;
 	}
 
 	parameter_types! {
@@ -223,7 +225,7 @@ mod tests {
 	}
 
 	pub fn new_test_ext() -> sp_io::TestExternalities {
-		let mut t = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
+		let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 		// We use default for brevity, but you can configure as desired if needed.
 		pallet_balances::GenesisConfig::<Test>::default()
 			.assimilate_storage(&mut t)

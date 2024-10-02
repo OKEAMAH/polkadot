@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -28,17 +28,16 @@ use futures::{
 	FutureExt, TryFutureExt,
 };
 
-use sp_keystore::SyncCryptoStorePtr;
+use polkadot_node_subsystem_util::reputation::ReputationAggregator;
+use sp_keystore::KeystorePtr;
 
 use polkadot_node_network_protocol::{
-	request_response::{v1 as request_v1, IncomingRequestReceiver},
+	request_response::{v1 as request_v1, vstaging as protocol_vstaging, IncomingRequestReceiver},
 	PeerId, UnifiedReputationChange as Rep,
 };
 use polkadot_primitives::CollatorPair;
 
-use polkadot_node_subsystem::{
-	errors::SubsystemError, messages::NetworkBridgeTxMessage, overseer, SpawnedSubsystem,
-};
+use polkadot_node_subsystem::{errors::SubsystemError, overseer, DummySubsystem, SpawnedSubsystem};
 
 mod error;
 
@@ -70,19 +69,28 @@ pub enum ProtocolSide {
 	/// Validators operate on the relay chain.
 	Validator {
 		/// The keystore holding validator keys.
-		keystore: SyncCryptoStorePtr,
+		keystore: KeystorePtr,
 		/// An eviction policy for inactive peers or validators.
 		eviction_policy: CollatorEvictionPolicy,
 		/// Prometheus metrics for validators.
 		metrics: validator_side::Metrics,
 	},
 	/// Collators operate on a parachain.
-	Collator(
-		PeerId,
-		CollatorPair,
-		IncomingRequestReceiver<request_v1::CollationFetchingRequest>,
-		collator_side::Metrics,
-	),
+	Collator {
+		/// Local peer id.
+		peer_id: PeerId,
+		/// Parachain collator pair.
+		collator_pair: CollatorPair,
+		/// Receiver for v1 collation fetching requests.
+		request_receiver_v1: IncomingRequestReceiver<request_v1::CollationFetchingRequest>,
+		/// Receiver for vstaging collation fetching requests.
+		request_receiver_vstaging:
+			IncomingRequestReceiver<protocol_vstaging::CollationFetchingRequest>,
+		/// Metrics.
+		metrics: collator_side::Metrics,
+	},
+	/// No protocol side, just disable it.
+	None,
 }
 
 /// The collator protocol subsystem.
@@ -99,24 +107,34 @@ impl CollatorProtocolSubsystem {
 	pub fn new(protocol_side: ProtocolSide) -> Self {
 		Self { protocol_side }
 	}
-
-	async fn run<Context>(self, ctx: Context) -> std::result::Result<(), error::FatalError> {
-		match self.protocol_side {
-			ProtocolSide::Validator { keystore, eviction_policy, metrics } =>
-				validator_side::run(ctx, keystore, eviction_policy, metrics).await,
-			ProtocolSide::Collator(local_peer_id, collator_pair, req_receiver, metrics) =>
-				collator_side::run(ctx, local_peer_id, collator_pair, req_receiver, metrics).await,
-		}
-	}
 }
 
 #[overseer::subsystem(CollatorProtocol, error=SubsystemError, prefix=self::overseer)]
 impl<Context> CollatorProtocolSubsystem {
 	fn start(self, ctx: Context) -> SpawnedSubsystem {
-		let future = self
-			.run(ctx)
+		let future = match self.protocol_side {
+			ProtocolSide::Validator { keystore, eviction_policy, metrics } =>
+				validator_side::run(ctx, keystore, eviction_policy, metrics)
+					.map_err(|e| SubsystemError::with_origin("collator-protocol", e))
+					.boxed(),
+			ProtocolSide::Collator {
+				peer_id,
+				collator_pair,
+				request_receiver_v1,
+				request_receiver_vstaging,
+				metrics,
+			} => collator_side::run(
+				ctx,
+				peer_id,
+				collator_pair,
+				request_receiver_v1,
+				request_receiver_vstaging,
+				metrics,
+			)
 			.map_err(|e| SubsystemError::with_origin("collator-protocol", e))
-			.boxed();
+			.boxed(),
+			ProtocolSide::None => return DummySubsystem.start(ctx),
+		};
 
 		SpawnedSubsystem { name: "collator-protocol-subsystem", future }
 	}
@@ -124,6 +142,7 @@ impl<Context> CollatorProtocolSubsystem {
 
 /// Modify the reputation of a peer based on its behavior.
 async fn modify_reputation(
+	reputation: &mut ReputationAggregator,
 	sender: &mut impl overseer::CollatorProtocolSenderTrait,
 	peer: PeerId,
 	rep: Rep,
@@ -135,7 +154,7 @@ async fn modify_reputation(
 		"reputation change for peer",
 	);
 
-	sender.send_message(NetworkBridgeTxMessage::ReportPeer(peer, rep)).await;
+	reputation.modify(sender, peer, rep).await;
 }
 
 /// Wait until tick and return the timestamp for the following one.

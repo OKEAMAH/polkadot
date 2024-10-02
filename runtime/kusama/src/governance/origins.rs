@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -38,7 +38,7 @@ pub mod pallet_custom_origins {
 		Treasurer,
 		/// Origin for managing the composition of the fellowship.
 		FellowshipAdmin,
-		/// Origin for managing the registrar.
+		/// Origin for managing the registrar and permissioned HRMP channel operations.
 		GeneralAdmin,
 		/// Origin for starting auctions.
 		AuctionAdmin,

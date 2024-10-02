@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,7 +16,7 @@
 
 use super::*;
 use crate::mock::{new_test_ext, Configuration, ParasShared, RuntimeOrigin, Test};
-use frame_support::{assert_err, assert_ok};
+use frame_support::{assert_err, assert_noop, assert_ok};
 
 fn on_new_session(session_index: SessionIndex) -> (HostConfiguration<u32>, HostConfiguration<u32>) {
 	ParasShared::set_session_index(session_index);
@@ -72,18 +72,18 @@ fn config_changes_after_2_session_boundary() {
 		// Verify that the current configuration has not changed and that there is a scheduled
 		// change for the SESSION_DELAY sessions in advance.
 		assert_eq!(Configuration::config(), old_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![(2, config.clone())]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, config.clone())]);
 
 		on_new_session(1);
 
 		// One session has passed, we should be still waiting for the pending configuration.
 		assert_eq!(Configuration::config(), old_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![(2, config.clone())]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, config.clone())]);
 
 		on_new_session(2);
 
 		assert_eq!(Configuration::config(), config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![]);
 	})
 }
 
@@ -99,17 +99,17 @@ fn consecutive_changes_within_one_session() {
 		assert_ok!(Configuration::set_validation_upgrade_delay(RuntimeOrigin::root(), 100));
 		assert_ok!(Configuration::set_validation_upgrade_cooldown(RuntimeOrigin::root(), 100));
 		assert_eq!(Configuration::config(), old_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![(2, config.clone())]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, config.clone())]);
 
 		on_new_session(1);
 
 		assert_eq!(Configuration::config(), old_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![(2, config.clone())]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, config.clone())]);
 
 		on_new_session(2);
 
 		assert_eq!(Configuration::config(), config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![]);
 	});
 }
 
@@ -127,10 +127,7 @@ fn pending_next_session_but_we_upgrade_once_more() {
 
 		assert_ok!(Configuration::set_validation_upgrade_delay(RuntimeOrigin::root(), 100));
 		assert_eq!(Configuration::config(), initial_config);
-		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
-			vec![(2, intermediate_config.clone())]
-		);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, intermediate_config.clone())]);
 
 		on_new_session(1);
 
@@ -141,22 +138,19 @@ fn pending_next_session_but_we_upgrade_once_more() {
 		// This should result in yet another configiguration change scheduled.
 		assert_eq!(Configuration::config(), initial_config);
 		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
+			PendingConfigs::<Test>::get(),
 			vec![(2, intermediate_config.clone()), (3, final_config.clone())]
 		);
 
 		on_new_session(2);
 
 		assert_eq!(Configuration::config(), intermediate_config);
-		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
-			vec![(3, final_config.clone())]
-		);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(3, final_config.clone())]);
 
 		on_new_session(3);
 
 		assert_eq!(Configuration::config(), final_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![]);
 	});
 }
 
@@ -175,10 +169,7 @@ fn scheduled_session_config_update_while_next_session_pending() {
 
 		assert_ok!(Configuration::set_validation_upgrade_delay(RuntimeOrigin::root(), 100));
 		assert_eq!(Configuration::config(), initial_config);
-		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
-			vec![(2, intermediate_config.clone())]
-		);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(2, intermediate_config.clone())]);
 
 		on_new_session(1);
 
@@ -190,22 +181,19 @@ fn scheduled_session_config_update_while_next_session_pending() {
 		// This should result in yet another configiguration change scheduled.
 		assert_eq!(Configuration::config(), initial_config);
 		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
+			PendingConfigs::<Test>::get(),
 			vec![(2, intermediate_config.clone()), (3, final_config.clone())]
 		);
 
 		on_new_session(2);
 
 		assert_eq!(Configuration::config(), intermediate_config);
-		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
-			vec![(3, final_config.clone())]
-		);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(3, final_config.clone())]);
 
 		on_new_session(3);
 
 		assert_eq!(Configuration::config(), final_config);
-		assert_eq!(<Configuration as Store>::PendingConfigs::get(), vec![]);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![]);
 	});
 }
 
@@ -228,11 +216,7 @@ fn invariants() {
 		);
 
 		assert_err!(
-			Configuration::set_chain_availability_period(RuntimeOrigin::root(), 0),
-			Error::<Test>::InvalidNewValue
-		);
-		assert_err!(
-			Configuration::set_thread_availability_period(RuntimeOrigin::root(), 0),
+			Configuration::set_paras_availability_period(RuntimeOrigin::root(), 0),
 			Error::<Test>::InvalidNewValue
 		);
 		assert_err!(
@@ -240,18 +224,13 @@ fn invariants() {
 			Error::<Test>::InvalidNewValue
 		);
 
-		<Configuration as Store>::ActiveConfig::put(HostConfiguration {
-			chain_availability_period: 10,
-			thread_availability_period: 8,
+		ActiveConfig::<Test>::put(HostConfiguration {
+			paras_availability_period: 10,
 			minimum_validation_upgrade_delay: 11,
 			..Default::default()
 		});
 		assert_err!(
-			Configuration::set_chain_availability_period(RuntimeOrigin::root(), 12),
-			Error::<Test>::InvalidNewValue
-		);
-		assert_err!(
-			Configuration::set_thread_availability_period(RuntimeOrigin::root(), 12),
+			Configuration::set_paras_availability_period(RuntimeOrigin::root(), 12),
 			Error::<Test>::InvalidNewValue
 		);
 		assert_err!(
@@ -293,23 +272,25 @@ fn consistency_bypass_works() {
 fn setting_pending_config_members() {
 	new_test_ext(Default::default()).execute_with(|| {
 		let new_config = HostConfiguration {
+			async_backing_params: AsyncBackingParams {
+				allowed_ancestry_len: 0,
+				max_candidate_depth: 0,
+			},
 			validation_upgrade_cooldown: 100,
 			validation_upgrade_delay: 10,
 			code_retention_period: 5,
 			max_code_size: 100_000,
 			max_pov_size: 1024,
 			max_head_data_size: 1_000,
-			parathread_cores: 2,
-			parathread_retries: 5,
+			on_demand_cores: 2,
+			on_demand_retries: 5,
 			group_rotation_frequency: 20,
-			chain_availability_period: 10,
-			thread_availability_period: 8,
+			paras_availability_period: 10,
 			scheduling_lookahead: 3,
 			max_validators_per_core: None,
 			max_validators: None,
 			dispute_period: 239,
 			dispute_post_conclusion_acceptance_period: 10,
-			dispute_conclusion_by_time_out_period: 512,
 			no_show_slots: 240,
 			n_delay_tranches: 241,
 			zeroth_delay_tranche_width: 242,
@@ -318,7 +299,6 @@ fn setting_pending_config_members() {
 			max_upward_queue_count: 1337,
 			max_upward_queue_size: 228,
 			max_downward_message_size: 2048,
-			ump_service_total_weight: Weight::from_parts(20000, 20000),
 			max_upward_message_size: 448,
 			max_upward_message_num_per_candidate: 5,
 			hrmp_sender_deposit: 22,
@@ -326,15 +306,17 @@ fn setting_pending_config_members() {
 			hrmp_channel_max_capacity: 3921,
 			hrmp_channel_max_total_size: 7687,
 			hrmp_max_parachain_inbound_channels: 37,
-			hrmp_max_parathread_inbound_channels: 19,
 			hrmp_channel_max_message_size: 8192,
 			hrmp_max_parachain_outbound_channels: 10,
-			hrmp_max_parathread_outbound_channels: 20,
 			hrmp_max_message_num_per_candidate: 20,
-			ump_max_individual_weight: Weight::from_parts(909, 909),
-			pvf_checking_enabled: true,
 			pvf_voting_ttl: 3,
 			minimum_validation_upgrade_delay: 20,
+			executor_params: Default::default(),
+			on_demand_queue_max_size: 10_000u32,
+			on_demand_base_fee: 10_000_000u128,
+			on_demand_fee_variability: Perbill::from_percent(3),
+			on_demand_target_queue_utilization: Perbill::from_percent(25),
+			on_demand_ttl: 5u32,
 		};
 
 		Configuration::set_validation_upgrade_cooldown(
@@ -356,9 +338,9 @@ fn setting_pending_config_members() {
 		Configuration::set_max_pov_size(RuntimeOrigin::root(), new_config.max_pov_size).unwrap();
 		Configuration::set_max_head_data_size(RuntimeOrigin::root(), new_config.max_head_data_size)
 			.unwrap();
-		Configuration::set_parathread_cores(RuntimeOrigin::root(), new_config.parathread_cores)
+		Configuration::set_on_demand_cores(RuntimeOrigin::root(), new_config.on_demand_cores)
 			.unwrap();
-		Configuration::set_parathread_retries(RuntimeOrigin::root(), new_config.parathread_retries)
+		Configuration::set_on_demand_retries(RuntimeOrigin::root(), new_config.on_demand_retries)
 			.unwrap();
 		Configuration::set_group_rotation_frequency(
 			RuntimeOrigin::root(),
@@ -372,14 +354,9 @@ fn setting_pending_config_members() {
 			new_config.minimum_validation_upgrade_delay,
 		)
 		.unwrap();
-		Configuration::set_chain_availability_period(
+		Configuration::set_paras_availability_period(
 			RuntimeOrigin::root(),
-			new_config.chain_availability_period,
-		)
-		.unwrap();
-		Configuration::set_thread_availability_period(
-			RuntimeOrigin::root(),
-			new_config.thread_availability_period,
+			new_config.paras_availability_period,
 		)
 		.unwrap();
 		Configuration::set_scheduling_lookahead(
@@ -399,11 +376,6 @@ fn setting_pending_config_members() {
 		Configuration::set_dispute_post_conclusion_acceptance_period(
 			RuntimeOrigin::root(),
 			new_config.dispute_post_conclusion_acceptance_period,
-		)
-		.unwrap();
-		Configuration::set_dispute_conclusion_by_time_out_period(
-			RuntimeOrigin::root(),
-			new_config.dispute_conclusion_by_time_out_period,
 		)
 		.unwrap();
 		Configuration::set_no_show_slots(RuntimeOrigin::root(), new_config.no_show_slots).unwrap();
@@ -431,14 +403,16 @@ fn setting_pending_config_members() {
 			new_config.max_upward_queue_size,
 		)
 		.unwrap();
+		assert_noop!(
+			Configuration::set_max_upward_queue_size(
+				RuntimeOrigin::root(),
+				MAX_UPWARD_MESSAGE_SIZE_BOUND + 1,
+			),
+			Error::<Test>::InvalidNewValue
+		);
 		Configuration::set_max_downward_message_size(
 			RuntimeOrigin::root(),
 			new_config.max_downward_message_size,
-		)
-		.unwrap();
-		Configuration::set_ump_service_total_weight(
-			RuntimeOrigin::root(),
-			new_config.ump_service_total_weight,
 		)
 		.unwrap();
 		Configuration::set_max_upward_message_size(
@@ -476,11 +450,6 @@ fn setting_pending_config_members() {
 			new_config.hrmp_max_parachain_inbound_channels,
 		)
 		.unwrap();
-		Configuration::set_hrmp_max_parathread_inbound_channels(
-			RuntimeOrigin::root(),
-			new_config.hrmp_max_parathread_inbound_channels,
-		)
-		.unwrap();
 		Configuration::set_hrmp_channel_max_message_size(
 			RuntimeOrigin::root(),
 			new_config.hrmp_channel_max_message_size,
@@ -491,33 +460,15 @@ fn setting_pending_config_members() {
 			new_config.hrmp_max_parachain_outbound_channels,
 		)
 		.unwrap();
-		Configuration::set_hrmp_max_parathread_outbound_channels(
-			RuntimeOrigin::root(),
-			new_config.hrmp_max_parathread_outbound_channels,
-		)
-		.unwrap();
 		Configuration::set_hrmp_max_message_num_per_candidate(
 			RuntimeOrigin::root(),
 			new_config.hrmp_max_message_num_per_candidate,
 		)
 		.unwrap();
-		Configuration::set_ump_max_individual_weight(
-			RuntimeOrigin::root(),
-			new_config.ump_max_individual_weight,
-		)
-		.unwrap();
-		Configuration::set_pvf_checking_enabled(
-			RuntimeOrigin::root(),
-			new_config.pvf_checking_enabled,
-		)
-		.unwrap();
 		Configuration::set_pvf_voting_ttl(RuntimeOrigin::root(), new_config.pvf_voting_ttl)
 			.unwrap();
 
-		assert_eq!(
-			<Configuration as Store>::PendingConfigs::get(),
-			vec![(shared::SESSION_DELAY, new_config)],
-		);
+		assert_eq!(PendingConfigs::<Test>::get(), vec![(shared::SESSION_DELAY, new_config)],);
 	})
 }
 
@@ -536,10 +487,12 @@ fn verify_externally_accessible() {
 	use primitives::{well_known_keys, AbridgedHostConfiguration};
 
 	new_test_ext(Default::default()).execute_with(|| {
-		let ground_truth = HostConfiguration::default();
+		let mut ground_truth = HostConfiguration::default();
+		ground_truth.async_backing_params =
+			AsyncBackingParams { allowed_ancestry_len: 111, max_candidate_depth: 222 };
 
 		// Make sure that the configuration is stored in the storage.
-		<Configuration as Store>::ActiveConfig::put(ground_truth.clone());
+		ActiveConfig::<Test>::put(ground_truth.clone());
 
 		// Extract the active config via the well known key.
 		let raw_active_config = sp_io::storage::get(well_known_keys::ACTIVE_CONFIG)
@@ -560,6 +513,7 @@ fn verify_externally_accessible() {
 				hrmp_max_message_num_per_candidate: ground_truth.hrmp_max_message_num_per_candidate,
 				validation_upgrade_cooldown: ground_truth.validation_upgrade_cooldown,
 				validation_upgrade_delay: ground_truth.validation_upgrade_delay,
+				async_backing_params: ground_truth.async_backing_params,
 			},
 		);
 	});

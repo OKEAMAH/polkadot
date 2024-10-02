@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,7 +19,8 @@ use xcm::latest::{MultiAsset, MultiLocation};
 
 /// Filters assets/location pairs.
 ///
-/// Can be amalgamated into tuples. If any item returns `true`, it short-circuits, else `false` is returned.
+/// Can be amalgamated into tuples. If any item returns `true`, it short-circuits, else `false` is
+/// returned.
 #[deprecated = "Use `frame_support::traits::ContainsPair<MultiAsset, MultiLocation>` instead"]
 pub trait FilterAssetLocation {
 	/// A filter to distinguish between asset/location pairs.

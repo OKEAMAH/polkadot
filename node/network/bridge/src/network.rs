@@ -1,4 +1,4 @@
-// Copyright 2020-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -22,19 +22,15 @@ use futures::{prelude::*, stream::BoxStream};
 use parity_scale_codec::Encode;
 
 use sc_network::{
-	multiaddr::Multiaddr, Event as NetworkEvent, IfDisconnected, NetworkService, OutboundFailure,
-	RequestFailure,
-};
-use sc_network_common::{
-	config::parse_addr,
-	protocol::ProtocolName,
-	service::{NetworkEventStream, NetworkNotification, NetworkPeers, NetworkRequest},
+	config::parse_addr, multiaddr::Multiaddr, types::ProtocolName, Event as NetworkEvent,
+	IfDisconnected, NetworkEventStream, NetworkNotification, NetworkPeers, NetworkRequest,
+	NetworkService, OutboundFailure, ReputationChange, RequestFailure,
 };
 
 use polkadot_node_network_protocol::{
 	peer_set::{PeerSet, PeerSetProtocolNames, ProtocolVersion},
 	request_response::{OutgoingRequest, Recipient, ReqProtocolNames, Requests},
-	PeerId, UnifiedReputationChange as Rep,
+	PeerId,
 };
 use polkadot_primitives::{AuthorityDiscoveryId, Block, Hash};
 
@@ -59,6 +55,9 @@ pub(crate) fn send_message<M>(
 ) where
 	M: Encode + Clone,
 {
+	if peers.is_empty() {
+		return
+	}
 	let message = {
 		let encoded = message.encode();
 		metrics.on_notification_sent(peer_set, version, encoded.len(), peers.len());
@@ -69,8 +68,11 @@ pub(crate) fn send_message<M>(
 	// list. The message payload can be quite large. If the underlying
 	// network used `Bytes` this would not be necessary.
 	let last_peer = peers.pop();
-	// optimization: generate the protocol name once.
-	let protocol_name = protocol_names.get_name(peer_set, version);
+
+	// We always send messages on the "main" name even when a negotiated
+	// fallback is used. The libp2p implementation handles the fallback
+	// under the hood.
+	let protocol_name = protocol_names.get_main_name(peer_set);
 	peers.into_iter().for_each(|peer| {
 		net.write_notification(peer, protocol_name.clone(), message.clone());
 	});
@@ -98,7 +100,11 @@ pub trait Network: Clone + Send + 'static {
 	) -> Result<(), String>;
 
 	/// Removes the peers for the protocol's peer set (both reserved and non-reserved).
-	async fn remove_from_peers_set(&mut self, protocol: ProtocolName, peers: Vec<PeerId>);
+	async fn remove_from_peers_set(
+		&mut self,
+		protocol: ProtocolName,
+		peers: Vec<PeerId>,
+	) -> Result<(), String>;
 
 	/// Send a request to a remote peer.
 	async fn start_request<AD: AuthorityDiscovery>(
@@ -110,7 +116,7 @@ pub trait Network: Clone + Send + 'static {
 	);
 
 	/// Report a given peer as either beneficial (+) or costly (-) according to the given scalar.
-	fn report_peer(&self, who: PeerId, cost_benefit: Rep);
+	fn report_peer(&self, who: PeerId, rep: ReputationChange);
 
 	/// Disconnect a given peer from the protocol specified without harming reputation.
 	fn disconnect_peer(&self, who: PeerId, protocol: ProtocolName);
@@ -133,12 +139,16 @@ impl Network for Arc<NetworkService<Block, Hash>> {
 		NetworkService::set_reserved_peers(&**self, protocol, multiaddresses)
 	}
 
-	async fn remove_from_peers_set(&mut self, protocol: ProtocolName, peers: Vec<PeerId>) {
-		NetworkService::remove_peers_from_reserved_set(&**self, protocol, peers);
+	async fn remove_from_peers_set(
+		&mut self,
+		protocol: ProtocolName,
+		peers: Vec<PeerId>,
+	) -> Result<(), String> {
+		NetworkService::remove_peers_from_reserved_set(&**self, protocol, peers)
 	}
 
-	fn report_peer(&self, who: PeerId, cost_benefit: Rep) {
-		NetworkService::report_peer(&**self, who, cost_benefit.into_base_rep());
+	fn report_peer(&self, who: PeerId, rep: ReputationChange) {
+		NetworkService::report_peer(&**self, who, rep);
 	}
 
 	fn disconnect_peer(&self, who: PeerId, protocol: ProtocolName) {
@@ -193,8 +203,9 @@ impl Network for Arc<NetworkService<Block, Hash>> {
 				match pending_response
 					.send(Err(RequestFailure::Network(OutboundFailure::DialFailure)))
 				{
-					Err(_) =>
-						gum::debug!(target: LOG_TARGET, "Sending failed request response failed."),
+					Err(_) => {
+						gum::debug!(target: LOG_TARGET, "Sending failed request response failed.")
+					},
 					Ok(_) => {},
 				}
 				return

@@ -6,7 +6,9 @@ action-review-team: ci
 rules:
   - name: Runtime files
     check_type: changed_files
-    condition: ^runtime/(kusama|polkadot)/src/[^/]+\.rs$
+    condition:
+      include: ^runtime\/(kusama|polkadot)\/src\/.+\.rs$
+      exclude: ^runtime\/(kusama|polkadot)\/src\/weights\/.+\.rs$
     all_distinct:
       - min_approvals: 1
         teams:
@@ -21,7 +23,7 @@ rules:
       include: .*
       # excluding files from 'Runtime files' and 'CI files' rules
       exclude: ^runtime/(kusama|polkadot)/src/[^/]+\.rs$|^\.gitlab-ci\.yml|^(?!.*\.dic$|.*spellcheck\.toml$)scripts/ci/.*|^\.github/.*
-    min_approvals: 2
+    min_approvals: 3
     teams:
       - core-devs
 

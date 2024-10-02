@@ -1,4 +1,4 @@
-// Copyright 2017-2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -28,6 +28,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[allow(missing_docs)]
 #[fatality::fatality(splitable)]
 pub enum Error {
+	#[fatal(forward)]
+	#[error("Error while accessing runtime information")]
+	Runtime(#[from] util::runtime::Error),
+
 	#[error(transparent)]
 	Util(#[from] util::Error),
 
@@ -46,11 +50,14 @@ pub enum Error {
 	#[error("failed to get votes on dispute")]
 	CanceledCandidateVotes(#[source] oneshot::Canceled),
 
+	#[error("failed to get backable candidate from prospective parachains")]
+	CanceledBackableCandidate(#[source] oneshot::Canceled),
+
 	#[error(transparent)]
 	ChainApi(#[from] ChainApiError),
 
 	#[error(transparent)]
-	Runtime(#[from] RuntimeApiError),
+	RuntimeApi(#[from] RuntimeApiError),
 
 	#[error("failed to send message to ChainAPI")]
 	ChainApiMessageSend(#[source] mpsc::SendError),
@@ -75,9 +82,14 @@ pub enum Error {
 
 	#[error(transparent)]
 	SubsystemError(#[from] SubsystemError),
+
+	#[fatal]
+	#[error(transparent)]
+	OverseerExited(SubsystemError),
 }
 
-/// Used by `get_onchain_disputes` to represent errors related to fetching on-chain disputes from the Runtime
+/// Used by `get_onchain_disputes` to represent errors related to fetching on-chain disputes from
+/// the Runtime
 #[allow(dead_code)] // Remove when promoting to stable
 #[fatality::fatality]
 pub enum GetOnchainDisputesError {

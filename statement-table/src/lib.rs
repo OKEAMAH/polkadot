@@ -1,4 +1,4 @@
-// Copyright 2017-2023 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@
 
 pub mod generic;
 
-pub use generic::{Context, Table};
+pub use generic::{Config, Context, Table};
 
 /// Concrete instantiations suitable for v2 primitives.
 pub mod v2 {

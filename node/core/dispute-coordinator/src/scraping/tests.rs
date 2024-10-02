@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -81,6 +81,7 @@ impl TestState {
 			)
 			.await;
 			assert_chain_vote_request(&mut ctx_handle, &chain).await;
+			assert_unapplied_slashes_request(&mut ctx_handle, &chain).await;
 		};
 
 		let (scraper, _) = join(ChainScraper::new(ctx.sender(), leaf.clone()), overseer_fut)
@@ -135,8 +136,7 @@ fn make_candidate_receipt(relay_parent: Hash) -> CandidateReceipt {
 		para_head: zeros,
 		validation_code_hash: zeros.into(),
 	};
-	let candidate = CandidateReceipt { descriptor, commitments_hash: zeros };
-	candidate
+	CandidateReceipt { descriptor, commitments_hash: zeros }
 }
 
 /// Get a dummy `ActivatedLeaf` for a given block number.
@@ -182,7 +182,8 @@ fn get_backed_candidate_event(block_number: BlockNumber) -> Vec<CandidateEvent> 
 		GroupIndex::from(0),
 	)]
 }
-/// Hash for a 'magic' candidate. This is meant to be a special candidate used to verify special cases.
+/// Hash for a 'magic' candidate. This is meant to be a special candidate used to verify special
+/// cases.
 fn get_magic_candidate_hash() -> Hash {
 	BlakeTwo256::hash(&"abc".encode())
 }
@@ -242,6 +243,18 @@ async fn assert_chain_vote_request(virtual_overseer: &mut VirtualOverseer, _chai
 	);
 }
 
+async fn assert_unapplied_slashes_request(virtual_overseer: &mut VirtualOverseer, _chain: &[Hash]) {
+	assert_matches!(
+		overseer_recv(virtual_overseer).await,
+		AllMessages::RuntimeApi(RuntimeApiMessage::Request(
+			_hash,
+			RuntimeApiRequest::UnappliedSlashes(tx),
+		)) => {
+			tx.send(Ok(Vec::new())).unwrap();
+		}
+	);
+}
+
 async fn assert_finalized_block_number_request(
 	virtual_overseer: &mut VirtualOverseer,
 	response: BlockNumber,
@@ -287,6 +300,7 @@ async fn overseer_process_active_leaves_update<F>(
 		assert_candidate_events_request(virtual_overseer, chain, event_generator.clone()).await;
 		assert_chain_vote_request(virtual_overseer, chain).await;
 	}
+	assert_unapplied_slashes_request(virtual_overseer, chain).await;
 }
 
 #[test]
@@ -410,7 +424,8 @@ fn scraper_requests_candidates_of_non_finalized_ancestors() {
 			&mut virtual_overseer,
 			&chain,
 			finalized_block_number,
-			BLOCKS_TO_SKIP - finalized_block_number as usize, // Expect the provider not to go past finalized block.
+			BLOCKS_TO_SKIP -
+				(finalized_block_number - DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION) as usize, /* Expect the provider not to go past finalized block. */
 			get_backed_and_included_candidate_events,
 		);
 		join(process_active_leaves_update(ctx.sender(), &mut ordering, next_update), overseer_fut)
@@ -453,7 +468,8 @@ fn scraper_prunes_finalized_candidates() {
 
 		let candidate = make_candidate_receipt(get_block_number_hash(TEST_TARGET_BLOCK_NUMBER));
 
-		// After `DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` blocks the candidate should be removed
+		// After `DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` blocks the candidate should be
+		// removed
 		finalized_block_number =
 			TEST_TARGET_BLOCK_NUMBER + DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION;
 		process_finalized_block(&mut scraper, &finalized_block_number);
@@ -503,8 +519,9 @@ fn scraper_handles_backed_but_not_included_candidate() {
 		finalized_block_number += 1;
 		process_finalized_block(&mut scraper, &finalized_block_number);
 
-		// `FIRST_TEST_BLOCK` is finalized, which is within `BACKED_CANDIDATE_LIFETIME_AFTER_FINALIZATION` window.
-		// The candidate should still be backed.
+		// `FIRST_TEST_BLOCK` is finalized, which is within
+		// `BACKED_CANDIDATE_LIFETIME_AFTER_FINALIZATION` window. The candidate should still be
+		// backed.
 		let candidate = make_candidate_receipt(get_block_number_hash(TEST_TARGET_BLOCK_NUMBER));
 		assert!(!scraper.is_candidate_included(&candidate.hash()));
 		assert!(scraper.is_candidate_backed(&candidate.hash()));
@@ -561,7 +578,8 @@ fn scraper_handles_the_same_candidate_incuded_in_two_different_block_heights() {
 			.await;
 
 		// Finalize blocks to enforce pruning of scraped events.
-		// The magic candidate was added twice, so it shouldn't be removed if we finalize two more blocks.
+		// The magic candidate was added twice, so it shouldn't be removed if we finalize two more
+		// blocks.
 		finalized_block_number = test_targets.first().expect("there are two block nums") +
 			DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION;
 		process_finalized_block(&mut scraper, &finalized_block_number);
@@ -626,7 +644,8 @@ fn inclusions_per_candidate_properly_adds_and_prunes() {
 			])
 		);
 
-		// After `DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` blocks the earlier inclusion should be removed
+		// After `DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` blocks the earlier inclusion should
+		// be removed
 		finalized_block_number =
 			TEST_TARGET_BLOCK_NUMBER + DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION;
 		process_finalized_block(&mut scraper, &finalized_block_number);

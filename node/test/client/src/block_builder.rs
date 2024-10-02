@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,29 +17,31 @@
 use crate::{Client, FullBackend};
 use parity_scale_codec::{Decode, Encode};
 use polkadot_primitives::{Block, InherentData as ParachainsInherentData};
-use polkadot_test_runtime::{GetLastTimestamp, UncheckedExtrinsic};
+use polkadot_test_runtime::UncheckedExtrinsic;
+use polkadot_test_service::GetLastTimestamp;
 use sc_block_builder::{BlockBuilder, BlockBuilderProvider};
 use sp_api::ProvideRuntimeApi;
 use sp_consensus_babe::{
 	digests::{PreDigest, SecondaryPlainPreDigest},
 	BABE_ENGINE_ID,
 };
-use sp_runtime::{generic::BlockId, traits::Block as BlockT, Digest, DigestItem};
+use sp_runtime::{traits::Block as BlockT, Digest, DigestItem};
 use sp_state_machine::BasicExternalities;
 
 /// An extension for the test client to initialize a Polkadot specific block builder.
 pub trait InitPolkadotBlockBuilder {
 	/// Init a Polkadot specific block builder that works for the test runtime.
 	///
-	/// This will automatically create and push the inherents for you to make the block valid for the test runtime.
+	/// This will automatically create and push the inherents for you to make the block valid for
+	/// the test runtime.
 	fn init_polkadot_block_builder(
 		&self,
 	) -> sc_block_builder::BlockBuilder<Block, Client, FullBackend>;
 
 	/// Init a Polkadot specific block builder at a specific block that works for the test runtime.
 	///
-	/// Same as [`InitPolkadotBlockBuilder::init_polkadot_block_builder`] besides that it takes a [`BlockId`] to say
-	/// which should be the parent block of the block that is being build.
+	/// Same as [`InitPolkadotBlockBuilder::init_polkadot_block_builder`] besides that it takes a
+	/// [`BlockId`] to say which should be the parent block of the block that is being build.
 	fn init_polkadot_block_builder_at(
 		&self,
 		hash: <Block as BlockT>::Hash,
@@ -56,11 +58,11 @@ impl InitPolkadotBlockBuilder for Client {
 		&self,
 		hash: <Block as BlockT>::Hash,
 	) -> BlockBuilder<Block, Client, FullBackend> {
-		let at = BlockId::Hash(hash);
 		let last_timestamp =
-			self.runtime_api().get_last_timestamp(&at).expect("Get last timestamp");
+			self.runtime_api().get_last_timestamp(hash).expect("Get last timestamp");
 
-		// `MinimumPeriod` is a storage parameter type that requires externalities to access the value.
+		// `MinimumPeriod` is a storage parameter type that requires externalities to access the
+		// value.
 		let minimum_period = BasicExternalities::new_empty()
 			.execute_with(|| polkadot_test_runtime::MinimumPeriod::get());
 
@@ -73,7 +75,8 @@ impl InitPolkadotBlockBuilder for Client {
 			last_timestamp + minimum_period
 		};
 
-		// `SlotDuration` is a storage parameter type that requires externalities to access the value.
+		// `SlotDuration` is a storage parameter type that requires externalities to access the
+		// value.
 		let slot_duration = BasicExternalities::new_empty()
 			.execute_with(|| polkadot_test_runtime::SlotDuration::get());
 
@@ -88,7 +91,7 @@ impl InitPolkadotBlockBuilder for Client {
 		};
 
 		let mut block_builder = self
-			.new_block_at(&at, digest, false)
+			.new_block_at(hash, digest, false)
 			.expect("Creates new block builder for test runtime");
 
 		let mut inherent_data = sp_inherents::InherentData::new();
@@ -130,9 +133,9 @@ impl InitPolkadotBlockBuilder for Client {
 pub trait BlockBuilderExt {
 	/// Push a Polkadot test runtime specific extrinsic to the block.
 	///
-	/// This will internally use the [`BlockBuilder::push`] method, but this method expects a opaque extrinsic. So,
-	/// we provide this wrapper which converts a test runtime specific extrinsic to a opaque extrinsic and pushes it to
-	/// the block.
+	/// This will internally use the [`BlockBuilder::push`] method, but this method expects a opaque
+	/// extrinsic. So, we provide this wrapper which converts a test runtime specific extrinsic to a
+	/// opaque extrinsic and pushes it to the block.
 	///
 	/// Returns the result of the application of the extrinsic.
 	fn push_polkadot_extrinsic(

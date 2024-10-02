@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,24 +17,31 @@
 //! XCM configuration for Rococo.
 
 use super::{
-	parachains_origin, AccountId, AllPalletsWithSystem, Balances, CouncilCollective, ParaId,
-	Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, WeightToFee, XcmPallet,
+	parachains_origin, AccountId, AllPalletsWithSystem, Balances, Dmp, ParaId, Runtime,
+	RuntimeCall, RuntimeEvent, RuntimeOrigin, TransactionByteFee, WeightToFee, XcmPallet,
 };
 use frame_support::{
 	match_types, parameter_types,
 	traits::{Contains, Everything, Nothing},
 	weights::Weight,
 };
-use runtime_common::{paras_registrar, xcm_sender, ToAuthor};
+use frame_system::EnsureRoot;
+use rococo_runtime_constants::currency::CENTS;
+use runtime_common::{
+	crowdloan, paras_registrar,
+	xcm_sender::{ChildParachainRouter, ExponentialPrice},
+	ToAuthor,
+};
 use sp_core::ConstU32;
 use xcm::latest::prelude::*;
 use xcm_builder::{
 	AccountId32Aliases, AllowExplicitUnpaidExecutionFrom, AllowKnownQueryResponses,
-	AllowSubscriptionsFrom, AllowTopLevelPaidExecutionFrom, BackingToPlurality,
-	ChildParachainAsNative, ChildParachainConvertsVia, ChildSystemParachainAsSuperuser,
+	AllowSubscriptionsFrom, AllowTopLevelPaidExecutionFrom, ChildParachainAsNative,
+	ChildParachainConvertsVia, ChildSystemParachainAsSuperuser,
 	CurrencyAdapter as XcmCurrencyAdapter, FixedWeightBounds, IsChildSystemParachain, IsConcrete,
 	MintLocation, SignedAccountId32AsNative, SignedToAccountId32, SovereignSignedViaLocation,
-	TakeWeightCredit, UsingComponents, WeightInfoBounds, WithComputedOrigin,
+	TakeWeightCredit, TrailingSetTopicAsId, UsingComponents, WeightInfoBounds, WithComputedOrigin,
+	WithUniqueTopic,
 };
 use xcm_executor::{traits::WithOriginFilter, XcmExecutor};
 
@@ -49,8 +56,8 @@ parameter_types! {
 pub type LocationConverter =
 	(ChildParachainConvertsVia<ParaId, AccountId>, AccountId32Aliases<ThisNetwork, AccountId>);
 
-/// Our asset transactor. This is what allows us to interest with the runtime facilities from the point of
-/// view of XCM-only concepts like `MultiLocation` and `MultiAsset`.
+/// Our asset transactor. This is what allows us to interest with the runtime facilities from the
+/// point of view of XCM-only concepts like `MultiLocation` and `MultiAsset`.
 ///
 /// Ours is only aware of the Balances pallet, which is mapped to `RocLocation`.
 pub type LocalAssetTransactor = XcmCurrencyAdapter<
@@ -81,17 +88,26 @@ type LocalOriginConverter = (
 parameter_types! {
 	/// The amount of weight an XCM operation takes. This is a safe overestimate.
 	pub const BaseXcmWeight: Weight = Weight::from_parts(1_000_000_000, 64 * 1024);
+	/// The asset ID for the asset that we use to pay for message delivery fees.
+	pub FeeAssetId: AssetId = Concrete(TokenLocation::get());
+	/// The base fee for the message delivery fees.
+	pub const BaseDeliveryFee: u128 = CENTS.saturating_mul(3);
 }
+
 /// The XCM router. When we want to send an XCM message, we use this type. It amalgamates all of our
 /// individual routers.
-pub type XcmRouter = (
+pub type XcmRouter = WithUniqueTopic<(
 	// Only one router so far - use DMP to communicate with child parachains.
-	xcm_sender::ChildParachainRouter<Runtime, XcmPallet, ()>,
-);
+	ChildParachainRouter<
+		Runtime,
+		XcmPallet,
+		ExponentialPrice<FeeAssetId, BaseDeliveryFee, TransactionByteFee, Dmp>,
+	>,
+)>;
 
 parameter_types! {
 	pub const Roc: MultiAssetFilter = Wild(AllOf { fun: WildFungible, id: Concrete(TokenLocation::get()) });
-	pub const Statemine: MultiLocation = Parachain(1000).into_location();
+	pub const Rockmine: MultiLocation = Parachain(1000).into_location();
 	pub const Contracts: MultiLocation = Parachain(1002).into_location();
 	pub const Encointer: MultiLocation = Parachain(1003).into_location();
 	pub const Tick: MultiLocation = Parachain(100).into_location();
@@ -100,7 +116,7 @@ parameter_types! {
 	pub const RocForTick: (MultiAssetFilter, MultiLocation) = (Roc::get(), Tick::get());
 	pub const RocForTrick: (MultiAssetFilter, MultiLocation) = (Roc::get(), Trick::get());
 	pub const RocForTrack: (MultiAssetFilter, MultiLocation) = (Roc::get(), Track::get());
-	pub const RocForStatemine: (MultiAssetFilter, MultiLocation) = (Roc::get(), Statemine::get());
+	pub const RocForRockmine: (MultiAssetFilter, MultiLocation) = (Roc::get(), Rockmine::get());
 	pub const RocForContracts: (MultiAssetFilter, MultiLocation) = (Roc::get(), Contracts::get());
 	pub const RocForEncointer: (MultiAssetFilter, MultiLocation) = (Roc::get(), Encointer::get());
 	pub const MaxInstructions: u32 = 100;
@@ -110,7 +126,7 @@ pub type TrustedTeleporters = (
 	xcm_builder::Case<RocForTick>,
 	xcm_builder::Case<RocForTrick>,
 	xcm_builder::Case<RocForTrack>,
-	xcm_builder::Case<RocForStatemine>,
+	xcm_builder::Case<RocForRockmine>,
 	xcm_builder::Case<RocForContracts>,
 	xcm_builder::Case<RocForEncointer>,
 );
@@ -122,7 +138,7 @@ match_types! {
 }
 
 /// The barriers one of which must be passed for an XCM message to be executed.
-pub type Barrier = (
+pub type Barrier = TrailingSetTopicAsId<(
 	// Weight that is paid for may be consumed.
 	TakeWeightCredit,
 	// Expected responses are OK.
@@ -139,7 +155,7 @@ pub type Barrier = (
 		UniversalLocation,
 		ConstU32<8>,
 	>,
-);
+)>;
 
 /// A call filter for the XCM Transact instruction. This is a temporary measure until we
 /// properly account for proof size weights.
@@ -166,6 +182,16 @@ impl Contains<RuntimeCall> for SafeCallFilter {
 			RuntimeCall::Timestamp(..) |
 			RuntimeCall::Indices(..) |
 			RuntimeCall::Balances(..) |
+			RuntimeCall::Crowdloan(
+				crowdloan::Call::create { .. } |
+				crowdloan::Call::contribute { .. } |
+				crowdloan::Call::withdraw { .. } |
+				crowdloan::Call::refund { .. } |
+				crowdloan::Call::dissolve { .. } |
+				crowdloan::Call::edit { .. } |
+				crowdloan::Call::poke { .. } |
+				crowdloan::Call::contribute_all { .. },
+			) |
 			RuntimeCall::Session(pallet_session::Call::purge_keys { .. }) |
 			RuntimeCall::Grandpa(..) |
 			RuntimeCall::ImOnline(..) |
@@ -187,13 +213,11 @@ impl Contains<RuntimeCall> for SafeCallFilter {
 			) |
 			RuntimeCall::Council(
 				pallet_collective::Call::vote { .. } |
-				pallet_collective::Call::close_old_weight { .. } |
 				pallet_collective::Call::disapprove_proposal { .. } |
 				pallet_collective::Call::close { .. },
 			) |
 			RuntimeCall::TechnicalCommittee(
 				pallet_collective::Call::vote { .. } |
-				pallet_collective::Call::close_old_weight { .. } |
 				pallet_collective::Call::disapprove_proposal { .. } |
 				pallet_collective::Call::close { .. },
 			) |
@@ -235,19 +259,7 @@ impl Contains<RuntimeCall> for SafeCallFilter {
 				pallet_identity::Call::remove_sub { .. } |
 				pallet_identity::Call::quit_sub { .. },
 			) |
-			RuntimeCall::Society(
-				pallet_society::Call::bid { .. } |
-				pallet_society::Call::unbid { .. } |
-				pallet_society::Call::vouch { .. } |
-				pallet_society::Call::unvouch { .. } |
-				pallet_society::Call::vote { .. } |
-				pallet_society::Call::defender_vote { .. } |
-				pallet_society::Call::payout { .. } |
-				pallet_society::Call::unfound { .. } |
-				pallet_society::Call::judge_suspended_member { .. } |
-				pallet_society::Call::judge_suspended_candidate { .. } |
-				pallet_society::Call::set_max_members { .. },
-			) |
+			RuntimeCall::Society(..) |
 			RuntimeCall::Recovery(..) |
 			RuntimeCall::Vesting(..) |
 			RuntimeCall::Bounties(
@@ -307,14 +319,7 @@ impl xcm_executor::Config for XcmConfig {
 	type UniversalAliases = Nothing;
 	type CallDispatcher = WithOriginFilter<SafeCallFilter>;
 	type SafeCallFilter = SafeCallFilter;
-}
-
-parameter_types! {
-	pub const CollectiveBodyId: BodyId = BodyId::Unit;
-}
-
-parameter_types! {
-	pub const CouncilBodyId: BodyId = BodyId::Executive;
+	type Aliasers = Nothing;
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -322,20 +327,10 @@ parameter_types! {
 	pub ReachableDest: Option<MultiLocation> = Some(Parachain(1000).into());
 }
 
-/// Type to convert the council origin to a Plurality `MultiLocation` value.
-pub type CouncilToPlurality = BackingToPlurality<
-	RuntimeOrigin,
-	pallet_collective::Origin<Runtime, CouncilCollective>,
-	CouncilBodyId,
->;
-
-/// Type to convert an `Origin` type value into a `MultiLocation` value which represents an interior location
-/// of this chain.
+/// Type to convert an `Origin` type value into a `MultiLocation` value which represents an interior
+/// location of this chain.
 pub type LocalOriginToLocation = (
-	// We allow an origin from the Collective pallet to be used in XCM as a corresponding Plurality of the
-	// `Unit` body.
-	CouncilToPlurality,
-	// And a usual Signed origin to be used in XCM as a corresponding AccountId32
+	// A usual Signed origin to be used in XCM as a corresponding AccountId32
 	SignedToAccountId32<RuntimeOrigin, AccountId, ThisNetwork>,
 );
 impl pallet_xcm::Config for Runtime {
@@ -361,7 +356,10 @@ impl pallet_xcm::Config for Runtime {
 	type TrustedLockers = ();
 	type SovereignAccountOf = LocationConverter;
 	type MaxLockers = ConstU32<8>;
+	type MaxRemoteLockConsumers = ConstU32<0>;
+	type RemoteLockConsumerIdentifier = ();
 	type WeightInfo = crate::weights::pallet_xcm::WeightInfo<Runtime>;
 	#[cfg(feature = "runtime-benchmarks")]
 	type ReachableDest = ReachableDest;
+	type AdminOrigin = EnsureRoot<AccountId>;
 }

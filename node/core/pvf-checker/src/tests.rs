@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -29,10 +29,10 @@ use polkadot_primitives::{
 	BlockNumber, Hash, Header, PvfCheckStatement, SessionIndex, ValidationCode, ValidationCodeHash,
 	ValidatorId,
 };
-use sp_application_crypto::AppKey;
+use sp_application_crypto::AppCrypto;
 use sp_core::testing::TaskExecutor;
 use sp_keyring::Sr25519Keyring;
-use sp_keystore::SyncCryptoStore;
+use sp_keystore::Keystore;
 use sp_runtime::traits::AppVerify;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -110,8 +110,8 @@ impl TestState {
 		Self { leaves, sessions, last_session_index }
 	}
 
-	/// A convenience function to receive a message from the overseer and returning `None` if nothing
-	/// was received within a reasonable (for local tests anyway) timeout.
+	/// A convenience function to receive a message from the overseer and returning `None` if
+	/// nothing was received within a reasonable (for local tests anyway) timeout.
 	async fn recv_timeout(&mut self, handle: &mut VirtualOverseer) -> Option<AllMessages> {
 		futures::select! {
 			msg = handle.recv().fuse() => {
@@ -188,7 +188,7 @@ impl TestState {
 
 		let activated = if let Some(activated_leaf) = fake_leaf {
 			self.leaves.insert(
-				activated_leaf.block_hash.clone(),
+				activated_leaf.block_hash,
 				LeafState {
 					session_index: self.last_session_index,
 					pvfs: activated_leaf.pvfs.clone(),
@@ -363,12 +363,8 @@ fn test_harness(test: impl FnOnce(TestState, VirtualOverseer) -> BoxFuture<'stat
 	let keystore = Arc::new(sc_keystore::LocalKeystore::in_memory());
 
 	// Add OUR_VALIDATOR (which is Alice) to the keystore.
-	SyncCryptoStore::sr25519_generate_new(
-		&*keystore,
-		ValidatorId::ID,
-		Some(&OUR_VALIDATOR.to_seed()),
-	)
-	.expect("Generating keys for our node failed");
+	Keystore::sr25519_generate_new(&*keystore, ValidatorId::ID, Some(&OUR_VALIDATOR.to_seed()))
+		.expect("Generating keys for our node failed");
 
 	let subsystem_task = crate::run(ctx, keystore, crate::Metrics::default()).map(|x| x.unwrap());
 
@@ -501,9 +497,9 @@ fn reactivating_pvf_leads_to_second_check() {
 	test_harness(|mut test_state, mut handle| {
 		async move {
 			let pvf = dummy_validation_code_hash(1);
-			let block_1 = FakeLeaf::new(dummy_hash(), 1, vec![pvf.clone()]);
+			let block_1 = FakeLeaf::new(dummy_hash(), 1, vec![pvf]);
 			let block_2 = block_1.descendant(vec![]);
-			let block_3 = block_2.descendant(vec![pvf.clone()]);
+			let block_3 = block_2.descendant(vec![pvf]);
 
 			test_state
 				.activate_leaf_with_session(
@@ -556,9 +552,9 @@ fn dont_double_vote_for_pvfs_in_view() {
 	test_harness(|mut test_state, mut handle| {
 		async move {
 			let pvf = dummy_validation_code_hash(1);
-			let block_1_1 = FakeLeaf::new([1; 32].into(), 1, vec![pvf.clone()]);
-			let block_2_1 = FakeLeaf::new([2; 32].into(), 1, vec![pvf.clone()]);
-			let block_1_2 = block_1_1.descendant(vec![pvf.clone()]);
+			let block_1_1 = FakeLeaf::new([1; 32].into(), 1, vec![pvf]);
+			let block_2_1 = FakeLeaf::new([2; 32].into(), 1, vec![pvf]);
+			let block_1_2 = block_1_1.descendant(vec![pvf]);
 
 			test_state
 				.activate_leaf_with_session(
@@ -609,8 +605,8 @@ fn judgements_come_out_of_order() {
 			let pvf_1 = dummy_validation_code_hash(1);
 			let pvf_2 = dummy_validation_code_hash(2);
 
-			let block_1 = FakeLeaf::new([1; 32].into(), 1, vec![pvf_1.clone()]);
-			let block_2 = FakeLeaf::new([2; 32].into(), 1, vec![pvf_2.clone()]);
+			let block_1 = FakeLeaf::new([1; 32].into(), 1, vec![pvf_1]);
+			let block_2 = FakeLeaf::new([2; 32].into(), 1, vec![pvf_2]);
 
 			test_state
 				.activate_leaf_with_session(

@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -23,8 +23,7 @@
 //! will contain methods from `vstaging`.
 //! The promotion consists of the following steps:
 //! 1. Bump the version of the stable module (e.g. `v2` becomes `v3`)
-//! 2. Move methods from `vstaging` to `v3`. The new stable version should include
-//!    all methods from `vstaging` tagged with the new version number (e.g. all
-//!    `v3` methods).
-pub mod v2;
+//! 2. Move methods from `vstaging` to `v3`. The new stable version should include all methods from
+//!    `vstaging` tagged with the new version number (e.g. all `v3` methods).
+pub mod v5;
 pub mod vstaging;

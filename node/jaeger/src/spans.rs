@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -110,8 +110,8 @@ impl PerLeafSpan {
 	/// Creates a new instance.
 	///
 	/// Takes the `leaf_span` that is created by the overseer per leaf and a name for a child span.
-	/// Both will be stored in this object, while the child span is implicitly accessible by using the
-	/// [`Deref`](std::ops::Deref) implementation.
+	/// Both will be stored in this object, while the child span is implicitly accessible by using
+	/// the [`Deref`](std::ops::Deref) implementation.
 	pub fn new(leaf_span: Arc<Span>, name: &'static str) -> Self {
 		let span = leaf_span.child(name);
 
@@ -149,6 +149,7 @@ pub enum Stage {
 	AvailabilityRecovery = 6,
 	BitfieldDistribution = 7,
 	ApprovalChecking = 8,
+	ApprovalDistribution = 9,
 	// Expand as needed, numbers should be ascending according to the stage
 	// through the inclusion pipeline, or according to the descriptions
 	// in [the path of a para chain block]
@@ -276,11 +277,18 @@ impl Span {
 	}
 
 	/// Derive a child span from `self`.
-	pub fn child(&self, name: &'static str) -> Self {
+	pub fn child(&self, name: &str) -> Self {
 		match self {
 			Self::Enabled(inner) => Self::Enabled(inner.child(name)),
 			Self::Disabled => Self::Disabled,
 		}
+	}
+
+	/// Attach a 'traceID' tag set to the decimal representation of the candidate hash.
+	#[inline(always)]
+	pub fn with_trace_id(mut self, candidate_hash: CandidateHash) -> Self {
+		self.add_string_tag("traceID", hash_to_trace_identifier(candidate_hash.0));
+		self
 	}
 
 	#[inline(always)]
@@ -289,9 +297,20 @@ impl Span {
 		self
 	}
 
+	/// Attach a peer-id tag to the span.
 	#[inline(always)]
 	pub fn with_peer_id(self, peer: &PeerId) -> Self {
 		self.with_string_tag("peer-id", &peer.to_base58())
+	}
+
+	/// Attach a `peer-id` tag to the span when peer is present.
+	#[inline(always)]
+	pub fn with_optional_peer_id(self, peer: Option<&PeerId>) -> Self {
+		if let Some(peer) = peer {
+			self.with_peer_id(peer)
+		} else {
+			self
+		}
 	}
 
 	/// Attach a candidate hash to the span.

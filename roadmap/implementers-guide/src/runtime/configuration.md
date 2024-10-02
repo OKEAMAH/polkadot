@@ -1,4 +1,4 @@
-# Configuration Module
+# Configuration Pallet
 
 This module is responsible for managing all configuration of the parachain host in-flight. It provides a central point for configuration updates to prevent races between configuration changes and parachain-processing logic. Configuration can only change during the session change routine, and as this module handles the session change notification first it provides an invariant that the configuration does not change throughout the entire session. Both the [scheduler](scheduler.md) and [inclusion](inclusion.md) modules rely on this invariant to ensure proper behavior of the scheduler.
 
@@ -56,7 +56,7 @@ pub fn configuration() -> HostConfiguration {
 ///
 /// If there is already a pending update for the current session index + 1, then it won't be touched. Otherwise,
 /// that would violate the promise of this function that changes will be applied on the second session change (cur + 2).
-fn schedule_config_update(updater: impl FnOnce(&mut HostConfiguration<T::BlockNumber>)) -> DispatchResult
+fn schedule_config_update(updater: impl FnOnce(&mut HostConfiguration<BlockNumberFor<T>>)) -> DispatchResult
 ```
 
 ## Entry-points

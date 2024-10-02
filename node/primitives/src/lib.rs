@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -22,7 +22,7 @@
 
 #![deny(missing_docs)]
 
-use std::{pin::Pin, time::Duration};
+use std::{num::NonZeroUsize, pin::Pin};
 
 use bounded_vec::BoundedVec;
 use futures::Future;
@@ -32,14 +32,14 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use polkadot_primitives::{
 	BlakeTwo256, BlockNumber, CandidateCommitments, CandidateHash, CollatorPair,
 	CommittedCandidateReceipt, CompactStatement, EncodeAs, Hash, HashT, HeadData, Id as ParaId,
-	OutboundHrmpMessage, PersistedValidationData, SessionIndex, Signed, UncheckedSigned,
-	UpwardMessage, ValidationCode, ValidatorIndex, MAX_CODE_SIZE, MAX_POV_SIZE,
+	PersistedValidationData, SessionIndex, Signed, UncheckedSigned, ValidationCode,
+	ValidationCodeHash, ValidatorIndex, MAX_CODE_SIZE, MAX_POV_SIZE,
 };
 pub use sp_consensus_babe::{
 	AllowedSlots as BabeAllowedSlots, BabeEpochConfiguration, Epoch as BabeEpoch,
 };
 
-pub use polkadot_parachain::primitives::BlockData;
+pub use polkadot_parachain::primitives::{BlockData, HorizontalMessages, UpwardMessages};
 
 pub mod approval;
 
@@ -64,22 +64,8 @@ pub const VALIDATION_CODE_BOMB_LIMIT: usize = (MAX_CODE_SIZE * 4u32) as usize;
 /// The bomb limit for decompressing PoV blobs.
 pub const POV_BOMB_LIMIT: usize = (MAX_POV_SIZE * 4u32) as usize;
 
-/// The amount of time to spend on execution during backing.
-pub const BACKING_EXECUTION_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The amount of time to spend on execution during approval or disputes.
-///
-/// This is deliberately much longer than the backing execution timeout to
-/// ensure that in the absence of extremely large disparities between hardware,
-/// blocks that pass backing are considered executable by approval checkers or
-/// dispute participants.
-///
-/// NOTE: If this value is increased significantly, also check the dispute coordinator to consider
-/// candidates longer into finalization: `DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION`.
-pub const APPROVAL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12);
-
 /// How many blocks after finalization an information about backed/included candidate should be
-/// kept.
+/// pre-loaded (when scraoing onchain votes) and kept locally (when pruning).
 ///
 /// We don't want to remove scraped candidates on finalization because we want to
 /// be sure that disputes will conclude on abandoned forks.
@@ -87,6 +73,12 @@ pub const APPROVAL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12);
 /// avoid slashing. If a bad fork is abandoned too quickly because another
 /// better one gets finalized the entries for the bad fork will be pruned and we
 /// might never participate in a dispute for it.
+///
+/// Why pre-load finalized blocks? I dispute might be raised against finalized candidate. In most
+/// of the cases it will conclude valid (otherwise we are in big trouble) but never the less the
+/// node must participate. It's possible to see a vote for such dispute onchain before we have it
+/// imported by `dispute-distribution`. In this case we won't have `CandidateReceipt` and the import
+/// will fail unless we keep them preloaded.
 ///
 /// This value should consider the timeout we allow for participation in approval-voting. In
 /// particular, the following condition should hold:
@@ -151,6 +143,12 @@ impl SessionWindowSize {
 	}
 }
 
+impl From<SessionWindowSize> for NonZeroUsize {
+	fn from(value: SessionWindowSize) -> Self {
+		NonZeroUsize::new(value.get() as usize).expect("SessionWindowSize can't be 0. qed.")
+	}
+}
+
 /// The cumulative weight of a block in a fork-choice rule.
 pub type BlockWeight = u32;
 
@@ -182,8 +180,8 @@ impl std::fmt::Debug for Statement {
 impl Statement {
 	/// Get the candidate hash referenced by this statement.
 	///
-	/// If this is a `Statement::Seconded`, this does hash the candidate receipt, which may be expensive
-	/// for large candidates.
+	/// If this is a `Statement::Seconded`, this does hash the candidate receipt, which may be
+	/// expensive for large candidates.
 	pub fn candidate_hash(&self) -> CandidateHash {
 		match *self {
 			Statement::Valid(ref h) => *h,
@@ -197,6 +195,14 @@ impl Statement {
 		match *self {
 			Statement::Seconded(ref c) => CompactStatement::Seconded(c.hash()),
 			Statement::Valid(hash) => CompactStatement::Valid(hash),
+		}
+	}
+
+	/// Add the [`PersistedValidationData`] to the statement, if seconded.
+	pub fn supply_pvd(self, pvd: PersistedValidationData) -> StatementWithPVD {
+		match self {
+			Statement::Seconded(c) => StatementWithPVD::Seconded(c, pvd),
+			Statement::Valid(hash) => StatementWithPVD::Valid(hash),
 		}
 	}
 }
@@ -213,16 +219,101 @@ impl EncodeAs<CompactStatement> for Statement {
 	}
 }
 
+/// A statement, exactly the same as [`Statement`] but where seconded messages carry
+/// the [`PersistedValidationData`].
+#[derive(Clone, PartialEq, Eq)]
+pub enum StatementWithPVD {
+	/// A statement that a validator seconds a candidate.
+	Seconded(CommittedCandidateReceipt, PersistedValidationData),
+	/// A statement that a validator has deemed a candidate valid.
+	Valid(CandidateHash),
+}
+
+impl std::fmt::Debug for StatementWithPVD {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			StatementWithPVD::Seconded(seconded, _) =>
+				write!(f, "Seconded: {:?}", seconded.descriptor),
+			StatementWithPVD::Valid(hash) => write!(f, "Valid: {:?}", hash),
+		}
+	}
+}
+
+impl StatementWithPVD {
+	/// Get the candidate hash referenced by this statement.
+	///
+	/// If this is a `Statement::Seconded`, this does hash the candidate receipt, which may be
+	/// expensive for large candidates.
+	pub fn candidate_hash(&self) -> CandidateHash {
+		match *self {
+			StatementWithPVD::Valid(ref h) => *h,
+			StatementWithPVD::Seconded(ref c, _) => c.hash(),
+		}
+	}
+
+	/// Transform this statement into its compact version, which references only the hash
+	/// of the candidate.
+	pub fn to_compact(&self) -> CompactStatement {
+		match *self {
+			StatementWithPVD::Seconded(ref c, _) => CompactStatement::Seconded(c.hash()),
+			StatementWithPVD::Valid(hash) => CompactStatement::Valid(hash),
+		}
+	}
+
+	/// Drop the [`PersistedValidationData`] from the statement.
+	pub fn drop_pvd(self) -> Statement {
+		match self {
+			StatementWithPVD::Seconded(c, _) => Statement::Seconded(c),
+			StatementWithPVD::Valid(c_h) => Statement::Valid(c_h),
+		}
+	}
+
+	/// Drop the [`PersistedValidationData`] from the statement in a signed
+	/// variant.
+	pub fn drop_pvd_from_signed(signed: SignedFullStatementWithPVD) -> SignedFullStatement {
+		signed
+			.convert_to_superpayload_with(|s| s.drop_pvd())
+			.expect("persisted_validation_data doesn't affect encode_as; qed")
+	}
+
+	/// Converts the statement to a compact signed statement by dropping the
+	/// [`CommittedCandidateReceipt`] and the [`PersistedValidationData`].
+	pub fn signed_to_compact(signed: SignedFullStatementWithPVD) -> Signed<CompactStatement> {
+		signed
+			.convert_to_superpayload_with(|s| s.to_compact())
+			.expect("doesn't affect encode_as; qed")
+	}
+}
+
+impl From<&'_ StatementWithPVD> for CompactStatement {
+	fn from(stmt: &StatementWithPVD) -> Self {
+		stmt.to_compact()
+	}
+}
+
+impl EncodeAs<CompactStatement> for StatementWithPVD {
+	fn encode_as(&self) -> Vec<u8> {
+		self.to_compact().encode()
+	}
+}
+
 /// A statement, the corresponding signature, and the index of the sender.
 ///
 /// Signing context and validator set should be apparent from context.
 ///
-/// This statement is "full" in the sense that the `Seconded` variant includes the candidate receipt.
-/// Only the compact `SignedStatement` is suitable for submission to the chain.
+/// This statement is "full" in the sense that the `Seconded` variant includes the candidate
+/// receipt. Only the compact `SignedStatement` is suitable for submission to the chain.
 pub type SignedFullStatement = Signed<Statement, CompactStatement>;
 
 /// Variant of `SignedFullStatement` where the signature has not yet been verified.
 pub type UncheckedSignedFullStatement = UncheckedSigned<Statement, CompactStatement>;
+
+/// A statement, the corresponding signature, and the index of the sender.
+///
+/// Seconded statements are accompanied by the [`PersistedValidationData`]
+///
+/// Signing context and validator set should be apparent from context.
+pub type SignedFullStatementWithPVD = Signed<StatementWithPVD, CompactStatement>;
 
 /// Candidate invalidity details
 #[derive(Debug)]
@@ -258,8 +349,8 @@ pub enum InvalidCandidate {
 /// Result of the validation of the candidate.
 #[derive(Debug)]
 pub enum ValidationResult {
-	/// Candidate is valid. The validation process yields these outputs and the persisted validation
-	/// data used to form inputs.
+	/// Candidate is valid. The validation process yields these outputs and the persisted
+	/// validation data used to form inputs.
 	Valid(CandidateCommitments, PersistedValidationData),
 	/// Candidate is invalid.
 	Invalid(InvalidCandidate),
@@ -290,6 +381,18 @@ pub enum MaybeCompressedPoV {
 }
 
 #[cfg(not(target_os = "unknown"))]
+impl std::fmt::Debug for MaybeCompressedPoV {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		let (variant, size) = match self {
+			MaybeCompressedPoV::Raw(pov) => ("Raw", pov.block_data.0.len()),
+			MaybeCompressedPoV::Compressed(pov) => ("Compressed", pov.block_data.0.len()),
+		};
+
+		write!(f, "{} PoV ({} bytes)", variant, size)
+	}
+}
+
+#[cfg(not(target_os = "unknown"))]
 impl MaybeCompressedPoV {
 	/// Convert into a compressed [`PoV`].
 	///
@@ -308,13 +411,13 @@ impl MaybeCompressedPoV {
 ///
 /// - does not contain the erasure root; that's computed at the Polkadot level, not at Cumulus
 /// - contains a proof of validity.
-#[derive(Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode)]
 #[cfg(not(target_os = "unknown"))]
 pub struct Collation<BlockNumber = polkadot_primitives::BlockNumber> {
 	/// Messages destined to be interpreted by the Relay chain itself.
-	pub upward_messages: Vec<UpwardMessage>,
+	pub upward_messages: UpwardMessages,
 	/// The horizontal messages sent by the parachain.
-	pub horizontal_messages: Vec<OutboundHrmpMessage<ParaId>>,
+	pub horizontal_messages: HorizontalMessages,
 	/// New validation code.
 	pub new_validation_code: Option<ValidationCode>,
 	/// The head-data produced as a result of execution.
@@ -323,7 +426,8 @@ pub struct Collation<BlockNumber = polkadot_primitives::BlockNumber> {
 	pub proof_of_validity: MaybeCompressedPoV,
 	/// The number of messages processed from the DMQ.
 	pub processed_downward_messages: u32,
-	/// The mark which specifies the block number up to which all inbound HRMP messages are processed.
+	/// The mark which specifies the block number up to which all inbound HRMP messages are
+	/// processed.
 	pub hrmp_watermark: BlockNumber,
 }
 
@@ -346,9 +450,9 @@ pub struct CollationResult {
 	pub collation: Collation,
 	/// An optional result sender that should be informed about a successfully seconded collation.
 	///
-	/// There is no guarantee that this sender is informed ever about any result, it is completely okay to just drop it.
-	/// However, if it is called, it should be called with the signed statement of a parachain validator seconding the
-	/// collation.
+	/// There is no guarantee that this sender is informed ever about any result, it is completely
+	/// okay to just drop it. However, if it is called, it should be called with the signed
+	/// statement of a parachain validator seconding the collation.
 	pub result_sender: Option<futures::channel::oneshot::Sender<CollationSecondedSignal>>,
 }
 
@@ -364,8 +468,9 @@ impl CollationResult {
 
 /// Collation function.
 ///
-/// Will be called with the hash of the relay chain block the parachain block should be build on and the
-/// [`ValidationData`] that provides information about the state of the parachain on the relay chain.
+/// Will be called with the hash of the relay chain block the parachain block should be build on and
+/// the [`ValidationData`] that provides information about the state of the parachain on the relay
+/// chain.
 ///
 /// Returns an optional [`CollationResult`].
 #[cfg(not(target_os = "unknown"))]
@@ -384,7 +489,10 @@ pub struct CollationGenerationConfig {
 	/// Collator's authentication key, so it can sign things.
 	pub key: CollatorPair,
 	/// Collation function. See [`CollatorFn`] for more details.
-	pub collator: CollatorFn,
+	///
+	/// If this is `None`, it implies that collations are intended to be submitted
+	/// out-of-band and not pulled out of the function.
+	pub collator: Option<CollatorFn>,
 	/// The parachain that this collator collates for
 	pub para_id: ParaId,
 }
@@ -394,6 +502,25 @@ impl std::fmt::Debug for CollationGenerationConfig {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "CollationGenerationConfig {{ ... }}")
 	}
+}
+
+/// Parameters for [`CollationGenerationMessage::SubmitCollation`].
+#[derive(Debug)]
+pub struct SubmitCollationParams {
+	/// The relay-parent the collation is built against.
+	pub relay_parent: Hash,
+	/// The collation itself (PoV and commitments)
+	pub collation: Collation,
+	/// The parent block's head-data.
+	pub parent_head: HeadData,
+	/// The hash of the validation code the collation was created against.
+	pub validation_code_hash: ValidationCodeHash,
+	/// An optional result sender that should be informed about a successfully seconded collation.
+	///
+	/// There is no guarantee that this sender is informed ever about any result, it is completely
+	/// okay to just drop it. However, if it is called, it should be called with the signed
+	/// statement of a parachain validator seconding the collation.
+	pub result_sender: Option<futures::channel::oneshot::Sender<CollationSecondedSignal>>,
 }
 
 /// This is the data we keep available for each candidate included in the relay chain.
@@ -527,4 +654,11 @@ pub fn maybe_compress_pov(pov: PoV) -> PoV {
 
 	let pov = PoV { block_data: BlockData(raw) };
 	pov
+}
+
+/// How many votes we need to consider a candidate backed.
+///
+/// WARNING: This has to be kept in sync with the runtime check in the inclusion module.
+pub fn minimum_votes(n_validators: usize) -> usize {
+	std::cmp::min(2, n_validators)
 }

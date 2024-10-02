@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -35,9 +35,9 @@ use futures_timer::Delay;
 use rand::{seq::SliceRandom as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-use sc_network::Multiaddr;
-use sp_application_crypto::{AppKey, ByteArray};
-use sp_keystore::{CryptoStore, SyncCryptoStorePtr};
+use sc_network::{config::parse_addr, Multiaddr};
+use sp_application_crypto::{AppCrypto, ByteArray};
+use sp_keystore::{Keystore, KeystorePtr};
 
 use polkadot_node_network_protocol::{
 	authority_discovery::AuthorityDiscovery, peer_set::PeerSet, GossipSupportNetworkMessage,
@@ -79,7 +79,7 @@ const LOW_CONNECTIVITY_WARN_THRESHOLD: usize = 90;
 
 /// The Gossip Support subsystem.
 pub struct GossipSupport<AD> {
-	keystore: SyncCryptoStorePtr,
+	keystore: KeystorePtr,
 
 	last_session_index: Option<SessionIndex>,
 	// Some(timestamp) if we failed to resolve
@@ -118,7 +118,7 @@ where
 	AD: AuthorityDiscovery,
 {
 	/// Create a new instance of the [`GossipSupport`] subsystem.
-	pub fn new(keystore: SyncCryptoStorePtr, authority_discovery: AD, metrics: Metrics) -> Self {
+	pub fn new(keystore: KeystorePtr, authority_discovery: AD, metrics: Metrics) -> Self {
 		// Initialize metrics to `0`.
 		metrics.on_is_not_authority();
 		metrics.on_is_not_parachain_validator();
@@ -183,8 +183,7 @@ where
 	}
 
 	/// 1. Determine if the current session index has changed.
-	/// 2. If it has, determine relevant validators
-	///    and issue a connection request.
+	/// 2. If it has, determine relevant validators and issue a connection request.
 	async fn handle_active_leaves(
 		&mut self,
 		sender: &mut impl overseer::GossipSupportSenderTrait,
@@ -246,9 +245,10 @@ where
 				{
 					let mut connections = authorities_past_present_future(sender, leaf).await?;
 
-					// Remove all of our locally controlled validator indices so we don't connect to ourself.
+					// Remove all of our locally controlled validator indices so we don't connect to
+					// ourself.
 					let connections =
-						if remove_all_controlled(&self.keystore, &mut connections).await != 0 {
+						if remove_all_controlled(&self.keystore, &mut connections) != 0 {
 							connections
 						} else {
 							// If we control none of them, issue an empty connection request
@@ -260,16 +260,18 @@ where
 
 				if is_new_session {
 					// Gossip topology is only relevant for authorities in the current session.
-					let our_index = self.get_key_index_and_update_metrics(&session_info).await?;
+					let our_index = self.get_key_index_and_update_metrics(&session_info)?;
 
 					update_gossip_topology(
 						sender,
 						our_index,
-						session_info.discovery_keys,
+						session_info.discovery_keys.clone(),
 						relay_parent,
 						session_index,
 					)
 					.await?;
+
+					self.update_authority_ids(sender, session_info.discovery_keys).await;
 				}
 			}
 		}
@@ -279,12 +281,12 @@ where
 	// Checks if the node is an authority and also updates `polkadot_node_is_authority` and
 	// `polkadot_node_is_parachain_validator` metrics accordingly.
 	// On success, returns the index of our keys in `session_info.discovery_keys`.
-	async fn get_key_index_and_update_metrics(
+	fn get_key_index_and_update_metrics(
 		&mut self,
 		session_info: &SessionInfo,
 	) -> Result<usize, util::Error> {
 		let authority_check_result =
-			ensure_i_am_an_authority(&self.keystore, &session_info.discovery_keys).await;
+			ensure_i_am_an_authority(&self.keystore, &session_info.discovery_keys);
 
 		match authority_check_result.as_ref() {
 			Ok(index) => {
@@ -383,6 +385,45 @@ where
 		};
 	}
 
+	async fn update_authority_ids<Sender>(
+		&mut self,
+		sender: &mut Sender,
+		authorities: Vec<AuthorityDiscoveryId>,
+	) where
+		Sender: overseer::GossipSupportSenderTrait,
+	{
+		let mut authority_ids: HashMap<PeerId, HashSet<AuthorityDiscoveryId>> = HashMap::new();
+		for authority in authorities {
+			let peer_id = self
+				.authority_discovery
+				.get_addresses_by_authority_id(authority.clone())
+				.await
+				.into_iter()
+				.flat_map(|list| list.into_iter())
+				.find_map(|addr| parse_addr(addr).ok().map(|(p, _)| p));
+
+			if let Some(p) = peer_id {
+				authority_ids.entry(p).or_default().insert(authority);
+			}
+		}
+
+		for (peer_id, auths) in authority_ids {
+			if self.connected_authorities_by_peer_id.get(&peer_id) != Some(&auths) {
+				sender
+					.send_message(NetworkBridgeRxMessage::UpdatedAuthorityIds {
+						peer_id,
+						authority_ids: auths.clone(),
+					})
+					.await;
+
+				auths.iter().for_each(|a| {
+					self.connected_authorities.insert(a.clone(), peer_id);
+				});
+				self.connected_authorities_by_peer_id.insert(peer_id, auths);
+			}
+		}
+	}
+
 	fn handle_connect_disconnect(&mut self, ev: NetworkBridgeEvent<GossipSupportNetworkMessage>) {
 		match ev {
 			NetworkBridgeEvent::PeerConnected(peer_id, _, _, o_authority) => {
@@ -401,11 +442,18 @@ where
 					});
 				}
 			},
+			NetworkBridgeEvent::UpdatedAuthorityIds(_, _) => {
+				// The `gossip-support` subsystem itself issues these messages.
+			},
 			NetworkBridgeEvent::OurViewChange(_) => {},
 			NetworkBridgeEvent::PeerViewChange(_, _) => {},
 			NetworkBridgeEvent::NewGossipTopology { .. } => {},
-			NetworkBridgeEvent::PeerMessage(_, Versioned::V1(v)) => {
-				match v {};
+			NetworkBridgeEvent::PeerMessage(_, message) => {
+				// match void -> LLVM unreachable
+				match message {
+					Versioned::V1(m) => match m {},
+					Versioned::VStaging(m) => match m {},
+				}
 			},
 		}
 	}
@@ -457,12 +505,12 @@ async fn authorities_past_present_future(
 
 /// Return an error if we're not a validator in the given set (do not have keys).
 /// Otherwise, returns the index of our keys in `authorities`.
-async fn ensure_i_am_an_authority(
-	keystore: &SyncCryptoStorePtr,
+fn ensure_i_am_an_authority(
+	keystore: &KeystorePtr,
 	authorities: &[AuthorityDiscoveryId],
 ) -> Result<usize, util::Error> {
 	for (i, v) in authorities.iter().enumerate() {
-		if CryptoStore::has_keys(&**keystore, &[(v.to_raw_vec(), AuthorityDiscoveryId::ID)]).await {
+		if Keystore::has_keys(&**keystore, &[(v.to_raw_vec(), AuthorityDiscoveryId::ID)]) {
 			return Ok(i)
 		}
 	}
@@ -470,13 +518,13 @@ async fn ensure_i_am_an_authority(
 }
 
 /// Filter out all controlled keys in the given set. Returns the number of keys removed.
-async fn remove_all_controlled(
-	keystore: &SyncCryptoStorePtr,
+fn remove_all_controlled(
+	keystore: &KeystorePtr,
 	authorities: &mut Vec<AuthorityDiscoveryId>,
 ) -> usize {
 	let mut to_remove = Vec::new();
 	for (i, v) in authorities.iter().enumerate() {
-		if CryptoStore::has_keys(&**keystore, &[(v.to_raw_vec(), AuthorityDiscoveryId::ID)]).await {
+		if Keystore::has_keys(&**keystore, &[(v.to_raw_vec(), AuthorityDiscoveryId::ID)]) {
 			to_remove.push(i);
 		}
 	}

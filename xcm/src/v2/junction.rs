@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -18,9 +18,9 @@
 
 use super::{BodyId, BodyPart, Junctions, MultiLocation, NetworkId};
 use crate::v3::Junction as NewJunction;
+use bounded_collections::{ConstU32, WeakBoundedVec};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
-use sp_core::{bounded::WeakBoundedVec, ConstU32};
 
 /// A single item in a path to describe the relative location of a consensus system.
 ///
@@ -32,13 +32,13 @@ pub enum Junction {
 	///
 	/// Generally used when the context is a Polkadot Relay-chain.
 	Parachain(#[codec(compact)] u32),
-	/// A 32-byte identifier for an account of a specific network that is respected as a sovereign endpoint within
-	/// the context.
+	/// A 32-byte identifier for an account of a specific network that is respected as a sovereign
+	/// endpoint within the context.
 	///
 	/// Generally used when the context is a Substrate-based chain.
 	AccountId32 { network: NetworkId, id: [u8; 32] },
-	/// An 8-byte index for an account of a specific network that is respected as a sovereign endpoint within
-	/// the context.
+	/// An 8-byte index for an account of a specific network that is respected as a sovereign
+	/// endpoint within the context.
 	///
 	/// May be used when the context is a Frame-based chain and includes e.g. an indices pallet.
 	AccountIndex64 {
@@ -46,8 +46,8 @@ pub enum Junction {
 		#[codec(compact)]
 		index: u64,
 	},
-	/// A 20-byte identifier for an account of a specific network that is respected as a sovereign endpoint within
-	/// the context.
+	/// A 20-byte identifier for an account of a specific network that is respected as a sovereign
+	/// endpoint within the context.
 	///
 	/// May be used when the context is an Ethereum or Bitcoin chain or smart-contract.
 	AccountKey20 { network: NetworkId, key: [u8; 20] },
@@ -73,8 +73,8 @@ pub enum Junction {
 	OnlyChild,
 	/// A pluralistic body existing within consensus.
 	///
-	/// Typical to be used to represent a governance origin of a chain, but could in principle be used to represent
-	/// things such as multisigs also.
+	/// Typical to be used to represent a governance origin of a chain, but could in principle be
+	/// used to represent things such as multisigs also.
 	Plurality { id: BodyId, part: BodyPart },
 }
 
@@ -92,11 +92,11 @@ impl TryFrom<NewJunction> for Junction {
 				Self::AccountKey20 { network: network.try_into()?, key },
 			PalletInstance(index) => Self::PalletInstance(index),
 			GeneralIndex(id) => Self::GeneralIndex(id),
-			GeneralKey(key) => Self::GeneralKey(
-				key[..]
+			GeneralKey { length, data } => Self::GeneralKey(
+				data[0..data.len().min(length as usize)]
 					.to_vec()
 					.try_into()
-					.expect("array is of size 32 and so will never be out of bounds; qed"),
+					.expect("key is bounded to 32 and so will never be out of bounds; qed"),
 			),
 			OnlyChild => Self::OnlyChild,
 			Plurality { id, part } => Self::Plurality { id: id.into(), part: part.into() },

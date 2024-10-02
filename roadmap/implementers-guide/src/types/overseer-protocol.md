@@ -254,22 +254,66 @@ enum AvailabilityRecoveryMessage {
 Messages to and from the availability store.
 
 ```rust
-enum AvailabilityStoreMessage {
-    /// Query the `AvailableData` of a candidate by hash.
-    QueryAvailableData(CandidateHash, ResponseChannel<Option<AvailableData>>),
-    /// Query whether an `AvailableData` exists within the AV Store.
-    QueryDataAvailability(CandidateHash, ResponseChannel<bool>),
-    /// Query a specific availability chunk of the candidate's erasure-coding by validator index.
-    /// Returns the chunk and its inclusion proof against the candidate's erasure-root.
-    QueryChunk(CandidateHash, ValidatorIndex, ResponseChannel<Option<ErasureChunk>>),
-    /// Query all chunks that we have locally for the given candidate hash.
-    QueryAllChunks(CandidateHash, ResponseChannel<Vec<ErasureChunk>>),
-    /// Store a specific chunk of the candidate's erasure-coding by validator index, with an
-    /// accompanying proof.
-    StoreChunk(CandidateHash, ErasureChunk, ResponseChannel<Result<()>>),
-    /// Store `AvailableData`. If `ValidatorIndex` is provided, also store this validator's
-    /// `ErasureChunk`.
-    StoreAvailableData(CandidateHash, Option<ValidatorIndex>, u32, AvailableData, ResponseChannel<Result<()>>),
+pub enum AvailabilityStoreMessage {
+	/// Query a `AvailableData` from the AV store.
+	QueryAvailableData(CandidateHash, oneshot::Sender<Option<AvailableData>>),
+
+	/// Query whether a `AvailableData` exists within the AV Store.
+	///
+	/// This is useful in cases when existence
+	/// matters, but we don't want to necessarily pass around multiple
+	/// megabytes of data to get a single bit of information.
+	QueryDataAvailability(CandidateHash, oneshot::Sender<bool>),
+
+	/// Query an `ErasureChunk` from the AV store by the candidate hash and validator index.
+	QueryChunk(CandidateHash, ValidatorIndex, oneshot::Sender<Option<ErasureChunk>>),
+
+	/// Get the size of an `ErasureChunk` from the AV store by the candidate hash.
+	QueryChunkSize(CandidateHash, oneshot::Sender<Option<usize>>),
+
+	/// Query all chunks that we have for the given candidate hash.
+	QueryAllChunks(CandidateHash, oneshot::Sender<Vec<ErasureChunk>>),
+
+	/// Query whether an `ErasureChunk` exists within the AV Store.
+	///
+	/// This is useful in cases like bitfield signing, when existence
+	/// matters, but we don't want to necessarily pass around large
+	/// quantities of data to get a single bit of information.
+	QueryChunkAvailability(CandidateHash, ValidatorIndex, oneshot::Sender<bool>),
+
+	/// Store an `ErasureChunk` in the AV store.
+	///
+	/// Return `Ok(())` if the store operation succeeded, `Err(())` if it failed.
+	StoreChunk {
+		/// A hash of the candidate this chunk belongs to.
+		candidate_hash: CandidateHash,
+		/// The chunk itself.
+		chunk: ErasureChunk,
+		/// Sending side of the channel to send result to.
+		tx: oneshot::Sender<Result<(), ()>>,
+	},
+
+	/// Computes and checks the erasure root of `AvailableData` before storing all of its chunks in 
+	/// the AV store.
+	///
+	/// Return `Ok(())` if the store operation succeeded, `Err(StoreAvailableData)` if it failed.
+	StoreAvailableData {
+		/// A hash of the candidate this `available_data` belongs to.
+		candidate_hash: CandidateHash,
+		/// The number of validators in the session.
+		n_validators: u32,
+		/// The `AvailableData` itself.
+		available_data: AvailableData,
+		/// Erasure root we expect to get after chunking.
+		expected_erasure_root: Hash,
+		/// Sending side of the channel to send result to.
+		tx: oneshot::Sender<Result<(), StoreAvailableDataError>>,
+	},
+}
+
+/// The error result type of a [`AvailabilityStoreMessage::StoreAvailableData`] request.
+pub enum StoreAvailableDataError {
+	InvalidErasureRoot,
 }
 ```
 
@@ -301,15 +345,17 @@ enum BitfieldSigningMessage { }
 
 ```rust
 enum CandidateBackingMessage {
-  /// Requests a set of backable candidates that could be backed in a child of the given
-  /// relay-parent, referenced by its hash.
-  GetBackedCandidates(Hash, Vec<CandidateHash>, ResponseChannel<Vec<BackedCandidate>>),
+  /// Requests a set of backable candidates attested by the subsystem.
+  ///
+  /// Each pair is (candidate_hash, candidate_relay_parent).
+  GetBackedCandidates(Vec<(CandidateHash, Hash)>, oneshot::Sender<Vec<BackedCandidate>>),
   /// Note that the Candidate Backing subsystem should second the given candidate in the context of the
   /// given relay-parent (ref. by hash). This candidate must be validated using the provided PoV.
   /// The PoV is expected to match the `pov_hash` in the descriptor.
   Second(Hash, CandidateReceipt, PoV),
   /// Note a peer validator's statement about a particular candidate. Disagreements about validity must be escalated
-  /// to a broader check by Misbehavior Arbitration. Agreements are simply tallied until a quorum is reached.
+  /// to a broader check by the Disputes Subsystem, though that escalation is deferred until the approval voting 
+  /// stage to guarantee availability. Agreements are simply tallied until a quorum is reached.
   Statement(Statement),
 }
 ```
@@ -399,6 +445,57 @@ enum CollatorProtocolMessage {
     NoteGoodCollation(CollatorId, SignedFullStatement),
     /// Notify a collator that its collation was seconded.
     NotifyCollationSeconded(CollatorId, Hash, SignedFullStatement),
+}
+```
+
+## Collation Generation Message
+
+Messages received by the [Collation Generation subsystem](../node/collators/collation-generation.md)
+
+This is the core interface by which collators built on top of a Polkadot node submit collations to validators. As such, these messages are not sent by any subsystem but are instead sent from outside of the overseer.
+
+```rust
+/// A function provided to the subsystem which it uses to pull new collations.
+///
+/// This mode of querying collations is obsoleted by `CollationGenerationMessages::SubmitCollation`
+///
+/// The response channel, if present, is meant to receive a `Seconded` statement as a
+/// form of authentication, for collation mechanisms which rely on this for anti-spam.
+type CollatorFn = Fn(Hash, PersistedValidationData) -> Future<Output = (Collation, Option<ResponseChannel<SignedStatement>>)>;
+
+/// Configuration for the collation generator
+struct CollationGenerationConfig {
+    /// Collator's authentication key, so it can sign things.
+    key: CollatorPair,
+    /// Collation function. See [`CollatorFn`] for more details.
+    collator: CollatorFn,
+    /// The parachain that this collator collates for
+    para_id: ParaId,
+}
+
+/// Parameters for submitting a collation
+struct SubmitCollationParams {
+    /// The relay-parent the collation is built against.
+    relay_parent: Hash,
+    /// The collation itself (PoV and commitments)
+    collation: Collation,
+    /// The parent block's head-data.
+    parent_head: HeadData,
+    /// The hash of the validation code the collation was created against.
+    validation_code_hash: ValidationCodeHash,
+    /// A response channel for receiving a `Seconded` message about the candidate
+    /// once produced by a validator. This is not guaranteed to provide anything.
+    result_sender: Option<ResponseChannel<SignedStatement>>,
+}
+
+enum CollationGenerationMessage {
+    /// Initialize the collation generation subsystem
+	Initialize(CollationGenerationConfig),
+    /// Submit a collation to the subsystem. This will package it into a signed
+    /// [`CommittedCandidateReceipt`] and distribute along the network to validators.
+    ///
+    /// If sent before `Initialize`, this will be ignored.
+    SubmitCollation(SubmitCollationParams),
 }
 ```
 
@@ -752,7 +849,7 @@ enum StatementDistributionMessage {
     ///
     /// The statement distribution subsystem assumes that the statement should be correctly
     /// signed.
-    Share(Hash, SignedFullStatement),
+    Share(Hash, SignedFullStatementWithPVD),
 }
 ```
 

@@ -1,4 +1,4 @@
-# Disputes Module
+# Disputes Pallet
 
 After a backed candidate is made available, it is included and proceeds into an acceptance period during which validators are randomly selected to do (secondary) approval checks of the parablock. Any reports disputing the validity of the candidate will cause escalation, where even more validators are requested to check the block, and so on, until either the parablock is determined to be invalid or valid. Those on the wrong side of the dispute are slashed and, if the parablock is deemed invalid, the relay chain is rolled back to a point before that block was included.
 
@@ -56,7 +56,7 @@ Frozen: Option<BlockNumber>,
 
 ## Block Initialization
 
-1. Iterate through all disputes. If any have not concluded and started more than `config.dispute_conclusion_by_timeout_period` blocks ago, set them to `Concluded` and mildly punish all validators associated, as they have failed to distribute available data.
+This is currently a `no op`.
 
 ## Routines
 

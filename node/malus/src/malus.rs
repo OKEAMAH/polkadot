@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -36,14 +36,6 @@ enum NemesisVariant {
 	BackGarbageCandidate(BackGarbageCandidateOptions),
 	/// Delayed disputing of ancestors that are perfectly fine.
 	DisputeAncestor(DisputeAncestorOptions),
-
-	#[allow(missing_docs)]
-	#[command(name = "prepare-worker", hide = true)]
-	PvfPrepareWorker(polkadot_cli::ValidationWorkerCommand),
-
-	#[allow(missing_docs)]
-	#[command(name = "execute-worker", hide = true)]
-	PvfExecuteWorker(polkadot_cli::ValidationWorkerCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -87,29 +79,6 @@ impl MalusCli {
 					DisputeValidCandidates { fake_validation, fake_validation_error, percentage },
 					finality_delay,
 				)?
-			},
-			NemesisVariant::PvfPrepareWorker(cmd) => {
-				#[cfg(target_os = "android")]
-				{
-					return Err("PVF preparation workers are not supported under this platform")
-						.into()
-				}
-
-				#[cfg(not(target_os = "android"))]
-				{
-					polkadot_node_core_pvf::prepare_worker_entrypoint(&cmd.socket_path);
-				}
-			},
-			NemesisVariant::PvfExecuteWorker(cmd) => {
-				#[cfg(target_os = "android")]
-				{
-					return Err("PVF execution workers are not supported under this platform").into()
-				}
-
-				#[cfg(not(target_os = "android"))]
-				{
-					polkadot_node_core_pvf::execute_worker_entrypoint(&cmd.socket_path);
-				}
 			},
 		}
 		Ok(())

@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -15,10 +15,10 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::*;
+use bounded_collections::{ConstU32, WeakBoundedVec};
 use frame_benchmarking::{benchmarks, BenchmarkError, BenchmarkResult};
 use frame_support::weights::Weight;
 use frame_system::RawOrigin;
-use sp_core::{bounded::WeakBoundedVec, ConstU32};
 use sp_std::prelude::*;
 use xcm::{latest::prelude::*, v2};
 
@@ -114,6 +114,8 @@ benchmarks! {
 		let versioned_loc: VersionedMultiLocation = loc.into();
 		let _ = Pallet::<T>::request_version_notify(loc);
 	}: _(RawOrigin::Root, Box::new(versioned_loc))
+
+	force_suspension {}: _(RawOrigin::Root, true)
 
 	migrate_supported_version {
 		let old_version = XCM_VERSION - 1;

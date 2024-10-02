@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Cumulus.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -39,11 +39,10 @@
 //! - `Order` is now obsolete and replaced entirely by `Instruction`.
 //! - `Xcm` is now a simple wrapper around a `Vec<Instruction>`.
 //! - During conversion from `Order` to `Instruction`, we do not handle `BuyExecution`s that have
-//!   nested XCMs, i.e. if the `instructions` field in the `BuyExecution` enum struct variant is
-//!   not empty, then the conversion will fail. To address this, rewrite the XCM using
-//!   `Instruction`s in chronological order.
-//! - During conversion from `Xcm` to `Instruction`, we do not handle `RelayedFrom` messages at
-//!   all.
+//!   nested XCMs, i.e. if the `instructions` field in the `BuyExecution` enum struct variant is not
+//!   empty, then the conversion will fail. To address this, rewrite the XCM using `Instruction`s in
+//!   chronological order.
+//! - During conversion from `Xcm` to `Instruction`, we do not handle `RelayedFrom` messages at all.
 //!
 //! ### XCM Pallet
 //! - The `Weigher` configuration item must have sensible weights defined for `BuyExecution` and
@@ -59,11 +58,11 @@ use super::{
 	DoubleEncoded, GetWeight,
 };
 use alloc::{vec, vec::Vec};
+use bounded_collections::{ConstU32, WeakBoundedVec};
 use core::{fmt::Debug, result};
 use derivative::Derivative;
 use parity_scale_codec::{self, Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
-use sp_core::{bounded::WeakBoundedVec, ConstU32};
 
 mod junction;
 mod multiasset;
@@ -117,16 +116,25 @@ pub enum NetworkId {
 	Kusama,
 }
 
-impl TryInto<NetworkId> for Option<NewNetworkId> {
+impl TryFrom<Option<NewNetworkId>> for NetworkId {
 	type Error = ();
-	fn try_into(self) -> result::Result<NetworkId, ()> {
+	fn try_from(new: Option<NewNetworkId>) -> result::Result<NetworkId, ()> {
+		match new {
+			None => Ok(NetworkId::Any),
+			Some(id) => Self::try_from(id),
+		}
+	}
+}
+
+impl TryFrom<NewNetworkId> for NetworkId {
+	type Error = ();
+	fn try_from(new: NewNetworkId) -> result::Result<NetworkId, ()> {
 		use NewNetworkId::*;
-		Ok(match self {
-			None => NetworkId::Any,
-			Some(Polkadot) => NetworkId::Polkadot,
-			Some(Kusama) => NetworkId::Kusama,
-			_ => return Err(()),
-		})
+		match new {
+			Polkadot => Ok(NetworkId::Polkadot),
+			Kusama => Ok(NetworkId::Kusama),
+			_ => Err(()),
+		}
 	}
 }
 
@@ -144,20 +152,20 @@ pub enum BodyId {
 	Executive,
 	/// The unambiguous technical body (for Polkadot, this would be the Technical Committee).
 	Technical,
-	/// The unambiguous legislative body (for Polkadot, this could be considered the opinion of a majority of
-	/// lock-voters).
+	/// The unambiguous legislative body (for Polkadot, this could be considered the opinion of a
+	/// majority of lock-voters).
 	Legislative,
-	/// The unambiguous judicial body (this doesn't exist on Polkadot, but if it were to get a "grand oracle", it
-	/// may be considered as that).
+	/// The unambiguous judicial body (this doesn't exist on Polkadot, but if it were to get a
+	/// "grand oracle", it may be considered as that).
 	Judicial,
-	/// The unambiguous defense body (for Polkadot, an opinion on the topic given via a public referendum
-	/// on the `staking_admin` track).
+	/// The unambiguous defense body (for Polkadot, an opinion on the topic given via a public
+	/// referendum on the `staking_admin` track).
 	Defense,
-	/// The unambiguous administration body (for Polkadot, an opinion on the topic given via a public referendum
-	/// on the `general_admin` track).
+	/// The unambiguous administration body (for Polkadot, an opinion on the topic given via a
+	/// public referendum on the `general_admin` track).
 	Administration,
-	/// The unambiguous treasury body (for Polkadot, an opinion on the topic given via a public referendum
-	/// on the `treasurer` track).
+	/// The unambiguous treasury body (for Polkadot, an opinion on the topic given via a public
+	/// referendum on the `treasurer` track).
 	Treasury,
 }
 
@@ -413,8 +421,8 @@ pub type Weight = u64;
 ///
 /// All messages are delivered from a known *origin*, expressed as a `MultiLocation`.
 ///
-/// This is the inner XCM format and is version-sensitive. Messages are typically passed using the outer
-/// XCM format, known as `VersionedXcm`.
+/// This is the inner XCM format and is version-sensitive. Messages are typically passed using the
+/// outer XCM format, known as `VersionedXcm`.
 #[derive(Derivative, Encode, Decode, TypeInfo, xcm_procedural::XcmWeightInfoTrait)]
 #[derivative(Clone(bound = ""), Eq(bound = ""), PartialEq(bound = ""), Debug(bound = ""))]
 #[codec(encode_bound())]
@@ -426,7 +434,7 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// - `assets`: The asset(s) to be withdrawn into holding.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	WithdrawAsset(MultiAssets),
@@ -484,7 +492,7 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	TransferAsset { assets: MultiAssets, beneficiary: MultiLocation },
@@ -499,12 +507,12 @@ pub enum Instruction<RuntimeCall> {
 	/// - `dest`: The location whose sovereign account will own the assets and thus the effective
 	///   beneficiary for the assets and the notification target for the reserve asset deposit
 	///   message.
-	/// - `xcm`: The instructions that should follow the `ReserveAssetDeposited`
-	///   instruction, which is sent onwards to `dest`.
+	/// - `xcm`: The instructions that should follow the `ReserveAssetDeposited` instruction, which
+	///   is sent onwards to `dest`.
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	TransferReserveAsset { assets: MultiAssets, dest: MultiLocation, xcm: Xcm<()> },
@@ -519,7 +527,7 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	Transact {
@@ -529,10 +537,11 @@ pub enum Instruction<RuntimeCall> {
 		call: DoubleEncoded<RuntimeCall>,
 	},
 
-	/// A message to notify about a new incoming HRMP channel. This message is meant to be sent by the
-	/// relay-chain to a para.
+	/// A message to notify about a new incoming HRMP channel. This message is meant to be sent by
+	/// the relay-chain to a para.
 	///
-	/// - `sender`: The sender in the to-be opened channel. Also, the initiator of the channel opening.
+	/// - `sender`: The sender in the to-be opened channel. Also, the initiator of the channel
+	///   opening.
 	/// - `max_message_size`: The maximum size of a message proposed by the sender.
 	/// - `max_capacity`: The maximum number of messages that can be queued in the channel.
 	///
@@ -549,8 +558,8 @@ pub enum Instruction<RuntimeCall> {
 	},
 
 	/// A message to notify about that a previously sent open channel request has been accepted by
-	/// the recipient. That means that the channel will be opened during the next relay-chain session
-	/// change. This message is meant to be sent by the relay-chain to a para.
+	/// the recipient. That means that the channel will be opened during the next relay-chain
+	/// session change. This message is meant to be sent by the relay-chain to a para.
 	///
 	/// Safety: The message should originate directly from the relay-chain.
 	///
@@ -564,10 +573,10 @@ pub enum Instruction<RuntimeCall> {
 		recipient: u32,
 	},
 
-	/// A message to notify that the other party in an open channel decided to close it. In particular,
-	/// `initiator` is going to close the channel opened from `sender` to the `recipient`. The close
-	/// will be enacted at the next relay-chain session change. This message is meant to be sent by
-	/// the relay-chain to a para.
+	/// A message to notify that the other party in an open channel decided to close it. In
+	/// particular, `initiator` is going to close the channel opened from `sender` to the
+	/// `recipient`. The close will be enacted at the next relay-chain session change. This message
+	/// is meant to be sent by the relay-chain to a para.
 	///
 	/// Safety: The message should originate directly from the relay-chain.
 	///
@@ -591,14 +600,14 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// Safety: No concerns.
 	///
-	/// Kind: *Instruction*.
+	/// Kind: *Command*.
 	///
 	/// Errors:
 	ClearOrigin,
 
 	/// Mutate the origin to some interior location.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DescendOrigin(InteriorMultiLocation),
@@ -614,7 +623,7 @@ pub enum Instruction<RuntimeCall> {
 	///   is sent as a reply may take to execute. NOTE: If this is unexpectedly large then the
 	///   response may not execute at all.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ReportError {
@@ -630,11 +639,11 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// - `assets`: The asset(s) to remove from holding.
 	/// - `max_assets`: The maximum number of unique assets/asset instances to remove from holding.
-	///   Only the first `max_assets` assets/instances of those matched by `assets` will be removed,
-	///   prioritized under standard asset ordering. Any others will remain in holding.
+	///   Only the first `max_assets` assets/instances of those matched by `assets` will be
+	///   removed, prioritized under standard asset ordering. Any others will remain in holding.
 	/// - `beneficiary`: The new owner for the assets.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DepositAsset {
@@ -652,15 +661,15 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// - `assets`: The asset(s) to remove from holding.
 	/// - `max_assets`: The maximum number of unique assets/asset instances to remove from holding.
-	///   Only the first `max_assets` assets/instances of those matched by `assets` will be removed,
-	///   prioritized under standard asset ordering. Any others will remain in holding.
+	///   Only the first `max_assets` assets/instances of those matched by `assets` will be
+	///   removed, prioritized under standard asset ordering. Any others will remain in holding.
 	/// - `dest`: The location whose sovereign account will own the assets and thus the effective
 	///   beneficiary for the assets and the notification target for the reserve asset deposit
 	///   message.
-	/// - `xcm`: The orders that should follow the `ReserveAssetDeposited` instruction
-	///   which is sent onwards to `dest`.
+	/// - `xcm`: The orders that should follow the `ReserveAssetDeposited` instruction which is
+	///   sent onwards to `dest`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	DepositReserveAsset {
@@ -680,7 +689,7 @@ pub enum Instruction<RuntimeCall> {
 	/// - `give`: The asset(s) to remove from holding.
 	/// - `receive`: The minimum amount of assets(s) which `give` should be exchanged for.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ExchangeAsset { give: MultiAssetFilter, receive: MultiAssets },
@@ -690,13 +699,13 @@ pub enum Instruction<RuntimeCall> {
 	///
 	/// - `assets`: The asset(s) to remove from holding.
 	/// - `reserve`: A valid location that acts as a reserve for all asset(s) in `assets`. The
-	///   sovereign account of this consensus system *on the reserve location* will have appropriate
-	///   assets withdrawn and `effects` will be executed on them. There will typically be only one
-	///   valid location on any given asset/chain combination.
+	///   sovereign account of this consensus system *on the reserve location* will have
+	///   appropriate assets withdrawn and `effects` will be executed on them. There will typically
+	///   be only one valid location on any given asset/chain combination.
 	/// - `xcm`: The instructions to execute on the assets once withdrawn *on the reserve
 	///   location*.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	InitiateReserveWithdraw { assets: MultiAssetFilter, reserve: MultiLocation, xcm: Xcm<()> },
@@ -709,10 +718,10 @@ pub enum Instruction<RuntimeCall> {
 	/// - `xcm`: The instructions to execute on the assets once arrived *on the destination
 	///   location*.
 	///
-	/// NOTE: The `dest` location *MUST* respect this origin as a valid teleportation origin for all
-	/// `assets`. If it does not, then the assets may be lost.
+	/// NOTE: The `dest` location *MUST* respect this origin as a valid teleportation origin for
+	/// all `assets`. If it does not, then the assets may be lost.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	InitiateTeleport { assets: MultiAssetFilter, dest: MultiLocation, xcm: Xcm<()> },
@@ -730,7 +739,7 @@ pub enum Instruction<RuntimeCall> {
 	///   is sent as a reply may take to execute. NOTE: If this is unexpectedly large then the
 	///   response may not execute at all.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	QueryHolding {
@@ -750,14 +759,14 @@ pub enum Instruction<RuntimeCall> {
 	///   expected maximum weight of the total XCM to be executed for the
 	///   `AllowTopLevelPaidExecutionFrom` barrier to allow the XCM be executed.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	BuyExecution { fees: MultiAsset, weight_limit: WeightLimit },
 
 	/// Refund any surplus weight previously bought with `BuyExecution`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	RefundSurplus,
@@ -773,7 +782,7 @@ pub enum Instruction<RuntimeCall> {
 	/// weight however includes only the difference between the previous handler and the new
 	/// handler, which can reasonably be negative, which would result in a surplus.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	SetErrorHandler(Xcm<RuntimeCall>),
@@ -789,14 +798,14 @@ pub enum Instruction<RuntimeCall> {
 	/// weight however includes only the difference between the previous appendix and the new
 	/// appendix, which can reasonably be negative, which would result in a surplus.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	SetAppendix(Xcm<RuntimeCall>),
 
 	/// Clear the Error Register.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: None.
 	ClearError,
@@ -808,14 +817,14 @@ pub enum Instruction<RuntimeCall> {
 	/// - `ticket`: The ticket of the asset; this is an abstract identifier to help locate the
 	///   asset.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	ClaimAsset { assets: MultiAssets, ticket: MultiLocation },
 
 	/// Always throws an error of type `Trap`.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors:
 	/// - `Trap`: All circumstances, whose inner value is the same as this item's inner value.
@@ -830,7 +839,7 @@ pub enum Instruction<RuntimeCall> {
 	///   is sent as a reply may take to execute. NOTE: If this is unexpectedly large then the
 	///   response may not execute at all.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*
 	SubscribeVersion {
@@ -842,7 +851,7 @@ pub enum Instruction<RuntimeCall> {
 
 	/// Cancel the effect of a previous `SubscribeVersion` instruction.
 	///
-	/// Kind: *Instruction*
+	/// Kind: *Command*
 	///
 	/// Errors: *Fallible*
 	UnsubscribeVersion,
@@ -912,78 +921,73 @@ impl<RuntimeCall, W: XcmWeightInfo<RuntimeCall>> GetWeight<W> for Instruction<Ru
 	fn weight(&self) -> sp_weights::Weight {
 		use Instruction::*;
 		match self {
-			WithdrawAsset(assets) => sp_weights::Weight::from_ref_time(W::withdraw_asset(assets)),
+			WithdrawAsset(assets) => sp_weights::Weight::from_parts(W::withdraw_asset(assets), 0),
 			ReserveAssetDeposited(assets) =>
-				sp_weights::Weight::from_ref_time(W::reserve_asset_deposited(assets)),
+				sp_weights::Weight::from_parts(W::reserve_asset_deposited(assets), 0),
 			ReceiveTeleportedAsset(assets) =>
-				sp_weights::Weight::from_ref_time(W::receive_teleported_asset(assets)),
+				sp_weights::Weight::from_parts(W::receive_teleported_asset(assets), 0),
 			QueryResponse { query_id, response, max_weight } =>
-				sp_weights::Weight::from_ref_time(W::query_response(query_id, response, max_weight)),
+				sp_weights::Weight::from_parts(W::query_response(query_id, response, max_weight), 0),
 			TransferAsset { assets, beneficiary } =>
-				sp_weights::Weight::from_ref_time(W::transfer_asset(assets, beneficiary)),
+				sp_weights::Weight::from_parts(W::transfer_asset(assets, beneficiary), 0),
 			TransferReserveAsset { assets, dest, xcm } =>
-				sp_weights::Weight::from_ref_time(W::transfer_reserve_asset(&assets, dest, xcm)),
+				sp_weights::Weight::from_parts(W::transfer_reserve_asset(&assets, dest, xcm), 0),
 			Transact { origin_type, require_weight_at_most, call } =>
-				sp_weights::Weight::from_ref_time(W::transact(
-					origin_type,
-					require_weight_at_most,
-					call,
-				)),
+				sp_weights::Weight::from_parts(
+					W::transact(origin_type, require_weight_at_most, call),
+					0,
+				),
 			HrmpNewChannelOpenRequest { sender, max_message_size, max_capacity } =>
-				sp_weights::Weight::from_ref_time(W::hrmp_new_channel_open_request(
-					sender,
-					max_message_size,
-					max_capacity,
-				)),
+				sp_weights::Weight::from_parts(
+					W::hrmp_new_channel_open_request(sender, max_message_size, max_capacity),
+					0,
+				),
 			HrmpChannelAccepted { recipient } =>
-				sp_weights::Weight::from_ref_time(W::hrmp_channel_accepted(recipient)),
-			HrmpChannelClosing { initiator, sender, recipient } =>
-				sp_weights::Weight::from_ref_time(W::hrmp_channel_closing(
-					initiator, sender, recipient,
-				)),
-			ClearOrigin => sp_weights::Weight::from_ref_time(W::clear_origin()),
-			DescendOrigin(who) => sp_weights::Weight::from_ref_time(W::descend_origin(who)),
-			ReportError { query_id, dest, max_response_weight } =>
-				sp_weights::Weight::from_ref_time(W::report_error(
-					query_id,
-					dest,
-					max_response_weight,
-				)),
+				sp_weights::Weight::from_parts(W::hrmp_channel_accepted(recipient), 0),
+			HrmpChannelClosing { initiator, sender, recipient } => sp_weights::Weight::from_parts(
+				W::hrmp_channel_closing(initiator, sender, recipient),
+				0,
+			),
+			ClearOrigin => sp_weights::Weight::from_parts(W::clear_origin(), 0),
+			DescendOrigin(who) => sp_weights::Weight::from_parts(W::descend_origin(who), 0),
+			ReportError { query_id, dest, max_response_weight } => sp_weights::Weight::from_parts(
+				W::report_error(query_id, dest, max_response_weight),
+				0,
+			),
 			DepositAsset { assets, max_assets, beneficiary } =>
-				sp_weights::Weight::from_ref_time(W::deposit_asset(assets, max_assets, beneficiary)),
+				sp_weights::Weight::from_parts(W::deposit_asset(assets, max_assets, beneficiary), 0),
 			DepositReserveAsset { assets, max_assets, dest, xcm } =>
-				sp_weights::Weight::from_ref_time(W::deposit_reserve_asset(
-					assets, max_assets, dest, xcm,
-				)),
+				sp_weights::Weight::from_parts(
+					W::deposit_reserve_asset(assets, max_assets, dest, xcm),
+					0,
+				),
 			ExchangeAsset { give, receive } =>
-				sp_weights::Weight::from_ref_time(W::exchange_asset(give, receive)),
-			InitiateReserveWithdraw { assets, reserve, xcm } => sp_weights::Weight::from_ref_time(
+				sp_weights::Weight::from_parts(W::exchange_asset(give, receive), 0),
+			InitiateReserveWithdraw { assets, reserve, xcm } => sp_weights::Weight::from_parts(
 				W::initiate_reserve_withdraw(assets, reserve, xcm),
+				0,
 			),
 			InitiateTeleport { assets, dest, xcm } =>
-				sp_weights::Weight::from_ref_time(W::initiate_teleport(assets, dest, xcm)),
+				sp_weights::Weight::from_parts(W::initiate_teleport(assets, dest, xcm), 0),
 			QueryHolding { query_id, dest, assets, max_response_weight } =>
-				sp_weights::Weight::from_ref_time(W::query_holding(
-					query_id,
-					dest,
-					assets,
-					max_response_weight,
-				)),
+				sp_weights::Weight::from_parts(
+					W::query_holding(query_id, dest, assets, max_response_weight),
+					0,
+				),
 			BuyExecution { fees, weight_limit } =>
-				sp_weights::Weight::from_ref_time(W::buy_execution(fees, weight_limit)),
-			RefundSurplus => sp_weights::Weight::from_ref_time(W::refund_surplus()),
-			SetErrorHandler(xcm) => sp_weights::Weight::from_ref_time(W::set_error_handler(xcm)),
-			SetAppendix(xcm) => sp_weights::Weight::from_ref_time(W::set_appendix(xcm)),
-			ClearError => sp_weights::Weight::from_ref_time(W::clear_error()),
+				sp_weights::Weight::from_parts(W::buy_execution(fees, weight_limit), 0),
+			RefundSurplus => sp_weights::Weight::from_parts(W::refund_surplus(), 0),
+			SetErrorHandler(xcm) => sp_weights::Weight::from_parts(W::set_error_handler(xcm), 0),
+			SetAppendix(xcm) => sp_weights::Weight::from_parts(W::set_appendix(xcm), 0),
+			ClearError => sp_weights::Weight::from_parts(W::clear_error(), 0),
 			ClaimAsset { assets, ticket } =>
-				sp_weights::Weight::from_ref_time(W::claim_asset(assets, ticket)),
-			Trap(code) => sp_weights::Weight::from_ref_time(W::trap(code)),
-			SubscribeVersion { query_id, max_response_weight } =>
-				sp_weights::Weight::from_ref_time(W::subscribe_version(
-					query_id,
-					max_response_weight,
-				)),
-			UnsubscribeVersion => sp_weights::Weight::from_ref_time(W::unsubscribe_version()),
+				sp_weights::Weight::from_parts(W::claim_asset(assets, ticket), 0),
+			Trap(code) => sp_weights::Weight::from_parts(W::trap(code), 0),
+			SubscribeVersion { query_id, max_response_weight } => sp_weights::Weight::from_parts(
+				W::subscribe_version(query_id, max_response_weight),
+				0,
+			),
+			UnsubscribeVersion => sp_weights::Weight::from_parts(W::unsubscribe_version(), 0),
 		}
 	}
 }

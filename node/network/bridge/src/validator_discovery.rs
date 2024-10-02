@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -106,9 +106,10 @@ impl<N: Network, AD: AuthorityDiscovery> Service<N, AD> {
 	/// It will ask the network to connect to the validators and not disconnect
 	/// from them at least until the next request is issued for the same peer set.
 	///
-	/// This method will also disconnect from previously connected validators not in the `validator_ids` set.
-	/// it takes `network_service` and `authority_discovery_service` by value
-	/// and returns them as a workaround for the Future: Send requirement imposed by async function implementation.
+	/// This method will also disconnect from previously connected validators not in the
+	/// `validator_ids` set. it takes `network_service` and `authority_discovery_service` by value
+	/// and returns them as a workaround for the Future: Send requirement imposed by async function
+	/// implementation.
 	pub async fn on_request(
 		&mut self,
 		validator_ids: Vec<AuthorityDiscoveryId>,
@@ -174,7 +175,7 @@ mod tests {
 		PeerId,
 	};
 	use polkadot_primitives::Hash;
-	use sc_network::{Event as NetworkEvent, IfDisconnected, ProtocolName};
+	use sc_network::{Event as NetworkEvent, IfDisconnected, ProtocolName, ReputationChange};
 	use sp_keyring::Sr25519Keyring;
 	use std::collections::{HashMap, HashSet};
 
@@ -236,8 +237,13 @@ mod tests {
 			Ok(())
 		}
 
-		async fn remove_from_peers_set(&mut self, _protocol: ProtocolName, peers: Vec<PeerId>) {
+		async fn remove_from_peers_set(
+			&mut self,
+			_protocol: ProtocolName,
+			peers: Vec<PeerId>,
+		) -> Result<(), String> {
 			self.peers_set.retain(|elem| !peers.contains(elem));
+			Ok(())
 		}
 
 		async fn start_request<AD: AuthorityDiscovery>(
@@ -249,7 +255,7 @@ mod tests {
 		) {
 		}
 
-		fn report_peer(&self, _: PeerId, _: crate::Rep) {
+		fn report_peer(&self, _: PeerId, _: ReputationChange) {
 			panic!()
 		}
 
@@ -305,7 +311,7 @@ mod tests {
 		let (ns, ads) = new_network();
 
 		let authority_ids: Vec<_> =
-			ads.by_peer_id.values().map(|v| v.iter()).flatten().cloned().collect();
+			ads.by_peer_id.values().flat_map(|v| v.iter()).cloned().collect();
 
 		futures::executor::block_on(async move {
 			let (failed, _) = oneshot::channel();
@@ -338,7 +344,7 @@ mod tests {
 		let (ns, ads) = new_network();
 
 		let authority_ids: Vec<_> =
-			ads.by_peer_id.values().map(|v| v.iter()).flatten().cloned().collect();
+			ads.by_peer_id.values().flat_map(|v| v.iter()).cloned().collect();
 
 		futures::executor::block_on(async move {
 			let (failed, failed_rx) = oneshot::channel();

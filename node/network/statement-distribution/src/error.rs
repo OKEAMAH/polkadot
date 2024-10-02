@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -18,9 +18,13 @@
 //! Error handling related code and Error/Result definitions.
 
 use polkadot_node_network_protocol::PeerId;
-use polkadot_node_subsystem::SubsystemError;
-use polkadot_node_subsystem_util::runtime;
-use polkadot_primitives::{CandidateHash, Hash};
+use polkadot_node_subsystem::{RuntimeApiError, SubsystemError};
+use polkadot_node_subsystem_util::{
+	backing_implicit_view::FetchError as ImplicitViewFetchError, runtime,
+};
+use polkadot_primitives::{CandidateHash, Hash, Id as ParaId};
+
+use futures::channel::oneshot;
 
 use crate::LOG_TARGET;
 
@@ -56,6 +60,27 @@ pub enum Error {
 	#[error("Error while accessing runtime information")]
 	Runtime(#[from] runtime::Error),
 
+	#[error("RuntimeAPISubsystem channel closed before receipt")]
+	RuntimeApiUnavailable(#[source] oneshot::Canceled),
+
+	#[error("Fetching persisted validation data for para {0:?}, {1:?}")]
+	FetchPersistedValidationData(ParaId, RuntimeApiError),
+
+	#[error("Fetching session index failed {0:?}")]
+	FetchSessionIndex(RuntimeApiError),
+
+	#[error("Fetching session info failed {0:?}")]
+	FetchSessionInfo(RuntimeApiError),
+
+	#[error("Fetching availability cores failed {0:?}")]
+	FetchAvailabilityCores(RuntimeApiError),
+
+	#[error("Fetching validator groups failed {0:?}")]
+	FetchValidatorGroups(RuntimeApiError),
+
+	#[error("Attempted to share statement when not a validator or not assigned")]
+	InvalidShare,
+
 	#[error("Relay parent could not be found in active heads")]
 	NoSuchHead(Hash),
 
@@ -76,19 +101,28 @@ pub enum Error {
 	// Responder no longer waits for our data. (Should not happen right now.)
 	#[error("Oneshot `GetData` channel closed")]
 	ResponderGetDataCanceled,
+
+	// Failed to activate leaf due to a fetch error.
+	#[error("Implicit view failure while activating leaf")]
+	ActivateLeafFailure(ImplicitViewFetchError),
 }
 
 /// Utility for eating top level errors and log them.
 ///
 /// We basically always want to try and continue on error. This utility function is meant to
 /// consume top-level errors by simply logging them.
-pub fn log_error(result: Result<()>, ctx: &'static str) -> std::result::Result<(), FatalError> {
+pub fn log_error(
+	result: Result<()>,
+	ctx: &'static str,
+	warn_freq: &mut gum::Freq,
+) -> std::result::Result<(), FatalError> {
 	match result.into_nested()? {
 		Err(jfyi) => {
 			match jfyi {
 				JfyiError::RequestedUnannouncedCandidate(_, _) =>
 					gum::warn!(target: LOG_TARGET, error = %jfyi, ctx),
-				_ => gum::debug!(target: LOG_TARGET, error = %jfyi, ctx),
+				_ =>
+					gum::warn_if_frequent!(freq: warn_freq, max_rate: gum::Times::PerHour(100), target: LOG_TARGET, error = %jfyi, ctx),
 			}
 			Ok(())
 		},

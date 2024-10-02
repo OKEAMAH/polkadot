@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -69,8 +69,8 @@ pub trait AssetLock {
 	/// unlock.
 	type UnlockTicket: Enact;
 
-	/// `Enact` implementer for `prepare_reduce_unlockable`. This type may be dropped safely to avoid doing the
-	/// unlock.
+	/// `Enact` implementer for `prepare_reduce_unlockable`. This type may be dropped safely to
+	/// avoid doing the unlock.
 	type ReduceTicket: Enact;
 
 	/// Prepare to lock an asset. On success, a `Self::LockTicket` it returned, which can be used

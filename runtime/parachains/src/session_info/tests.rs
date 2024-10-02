@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -62,7 +62,7 @@ fn run_to_block(
 
 fn default_config() -> HostConfiguration<BlockNumber> {
 	HostConfiguration {
-		parathread_cores: 1,
+		on_demand_cores: 1,
 		dispute_period: 2,
 		needed_approvals: 3,
 		..Default::default()
@@ -71,10 +71,7 @@ fn default_config() -> HostConfiguration<BlockNumber> {
 
 fn genesis_config() -> MockGenesisConfig {
 	MockGenesisConfig {
-		configuration: configuration::GenesisConfig {
-			config: default_config(),
-			..Default::default()
-		},
+		configuration: configuration::GenesisConfig { config: default_config() },
 		..Default::default()
 	}
 }

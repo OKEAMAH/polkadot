@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,19 +16,24 @@
 
 //! Adapters to work with `frame_support::traits::tokens::fungibles` through XCM.
 
-use frame_support::traits::{tokens::fungibles, Contains, Get};
+use frame_support::traits::{
+	tokens::{
+		fungibles, Fortitude::Polite, Precision::Exact, Preservation::Preserve, Provenance::Minted,
+	},
+	Contains, Get,
+};
 use sp_std::{marker::PhantomData, prelude::*, result};
 use xcm::latest::prelude::*;
-use xcm_executor::traits::{Convert, Error as MatchError, MatchesFungibles, TransactAsset};
+use xcm_executor::traits::{ConvertLocation, Error as MatchError, MatchesFungibles, TransactAsset};
 
 /// `TransactAsset` implementation to convert a `fungibles` implementation to become usable in XCM.
 pub struct FungiblesTransferAdapter<Assets, Matcher, AccountIdConverter, AccountId>(
 	PhantomData<(Assets, Matcher, AccountIdConverter, AccountId)>,
 );
 impl<
-		Assets: fungibles::Transfer<AccountId>,
+		Assets: fungibles::Mutate<AccountId>,
 		Matcher: MatchesFungibles<Assets::AssetId, Assets::Balance>,
-		AccountIdConverter: Convert<MultiLocation, AccountId>,
+		AccountIdConverter: ConvertLocation<AccountId>,
 		AccountId: Clone, // can't get away without it since Currency is generic over it.
 	> TransactAsset for FungiblesTransferAdapter<Assets, Matcher, AccountIdConverter, AccountId>
 {
@@ -45,11 +50,11 @@ impl<
 		);
 		// Check we handle this asset.
 		let (asset_id, amount) = Matcher::matches_fungibles(what)?;
-		let source = AccountIdConverter::convert_ref(from)
-			.map_err(|()| MatchError::AccountIdConversionFailed)?;
-		let dest = AccountIdConverter::convert_ref(to)
-			.map_err(|()| MatchError::AccountIdConversionFailed)?;
-		Assets::transfer(asset_id, &source, &dest, amount, true)
+		let source = AccountIdConverter::convert_location(from)
+			.ok_or(MatchError::AccountIdConversionFailed)?;
+		let dest = AccountIdConverter::convert_location(to)
+			.ok_or(MatchError::AccountIdConversionFailed)?;
+		Assets::transfer(asset_id, &source, &dest, amount, Preserve)
 			.map_err(|e| XcmError::FailedToTransactAsset(e.into()))?;
 		Ok(what.clone().into())
 	}
@@ -58,8 +63,8 @@ impl<
 /// The location which is allowed to mint a particular asset.
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum MintLocation {
-	/// This chain is allowed to mint the asset. When we track teleports of the asset we ensure that
-	/// no more of the asset returns back to the chain than has been sent out.
+	/// This chain is allowed to mint the asset. When we track teleports of the asset we ensure
+	/// that no more of the asset returns back to the chain than has been sent out.
 	Local,
 	/// This chain is not allowed to mint the asset. When we track teleports of the asset we ensure
 	/// that no more of the asset is sent out from the chain than has been previously received.
@@ -144,7 +149,7 @@ pub struct FungiblesMutateAdapter<
 impl<
 		Assets: fungibles::Mutate<AccountId>,
 		Matcher: MatchesFungibles<Assets::AssetId, Assets::Balance>,
-		AccountIdConverter: Convert<MultiLocation, AccountId>,
+		AccountIdConverter: ConvertLocation<AccountId>,
 		AccountId: Clone, // can't get away without it since Currency is generic over it.
 		CheckAsset: AssetChecking<Assets::AssetId>,
 		CheckingAccount: Get<AccountId>,
@@ -153,14 +158,14 @@ impl<
 {
 	fn can_accrue_checked(asset_id: Assets::AssetId, amount: Assets::Balance) -> XcmResult {
 		let checking_account = CheckingAccount::get();
-		Assets::can_deposit(asset_id, &checking_account, amount, true)
+		Assets::can_deposit(asset_id, &checking_account, amount, Minted)
 			.into_result()
 			.map_err(|_| XcmError::NotDepositable)
 	}
 	fn can_reduce_checked(asset_id: Assets::AssetId, amount: Assets::Balance) -> XcmResult {
 		let checking_account = CheckingAccount::get();
 		Assets::can_withdraw(asset_id, &checking_account, amount)
-			.into_result()
+			.into_result(false)
 			.map_err(|_| XcmError::NotWithdrawable)
 			.map(|_| ())
 	}
@@ -171,7 +176,7 @@ impl<
 	}
 	fn reduce_checked(asset_id: Assets::AssetId, amount: Assets::Balance) {
 		let checking_account = CheckingAccount::get();
-		let ok = Assets::burn_from(asset_id, &checking_account, amount).is_ok();
+		let ok = Assets::burn_from(asset_id, &checking_account, amount, Exact, Polite).is_ok();
 		debug_assert!(ok, "`can_reduce_checked` must have returned `true` immediately prior; qed");
 	}
 }
@@ -179,7 +184,7 @@ impl<
 impl<
 		Assets: fungibles::Mutate<AccountId>,
 		Matcher: MatchesFungibles<Assets::AssetId, Assets::Balance>,
-		AccountIdConverter: Convert<MultiLocation, AccountId>,
+		AccountIdConverter: ConvertLocation<AccountId>,
 		AccountId: Clone, // can't get away without it since Currency is generic over it.
 		CheckAsset: AssetChecking<Assets::AssetId>,
 		CheckingAccount: Get<AccountId>,
@@ -277,10 +282,11 @@ impl<
 		);
 		// Check we handle this asset.
 		let (asset_id, amount) = Matcher::matches_fungibles(what)?;
-		let who = AccountIdConverter::convert_ref(who)
-			.map_err(|()| MatchError::AccountIdConversionFailed)?;
+		let who = AccountIdConverter::convert_location(who)
+			.ok_or(MatchError::AccountIdConversionFailed)?;
 		Assets::mint_into(asset_id, &who, amount)
-			.map_err(|e| XcmError::FailedToTransactAsset(e.into()))
+			.map_err(|e| XcmError::FailedToTransactAsset(e.into()))?;
+		Ok(())
 	}
 
 	fn withdraw_asset(
@@ -295,9 +301,9 @@ impl<
 		);
 		// Check we handle this asset.
 		let (asset_id, amount) = Matcher::matches_fungibles(what)?;
-		let who = AccountIdConverter::convert_ref(who)
-			.map_err(|()| MatchError::AccountIdConversionFailed)?;
-		Assets::burn_from(asset_id, &who, amount)
+		let who = AccountIdConverter::convert_location(who)
+			.ok_or(MatchError::AccountIdConversionFailed)?;
+		Assets::burn_from(asset_id, &who, amount, Exact, Polite)
 			.map_err(|e| XcmError::FailedToTransactAsset(e.into()))?;
 		Ok(what.clone().into())
 	}
@@ -312,9 +318,9 @@ pub struct FungiblesAdapter<
 	CheckingAccount,
 >(PhantomData<(Assets, Matcher, AccountIdConverter, AccountId, CheckAsset, CheckingAccount)>);
 impl<
-		Assets: fungibles::Mutate<AccountId> + fungibles::Transfer<AccountId>,
+		Assets: fungibles::Mutate<AccountId>,
 		Matcher: MatchesFungibles<Assets::AssetId, Assets::Balance>,
-		AccountIdConverter: Convert<MultiLocation, AccountId>,
+		AccountIdConverter: ConvertLocation<AccountId>,
 		AccountId: Clone, // can't get away without it since Currency is generic over it.
 		CheckAsset: AssetChecking<Assets::AssetId>,
 		CheckingAccount: Get<AccountId>,

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -21,13 +21,13 @@ use std::collections::{
 
 use parity_scale_codec::{Decode, Encode};
 
-use sp_application_crypto::AppKey;
-use sp_keystore::{CryptoStore, Error as KeystoreError, SyncCryptoStorePtr};
+use sp_application_crypto::AppCrypto;
+use sp_keystore::{Error as KeystoreError, KeystorePtr};
 
-use super::{Statement, UncheckedSignedFullStatement};
 use polkadot_primitives::{
-	CandidateHash, CandidateReceipt, DisputeStatement, InvalidDisputeStatementKind, SessionIndex,
-	SigningContext, ValidDisputeStatementKind, ValidatorId, ValidatorIndex, ValidatorSignature,
+	CandidateHash, CandidateReceipt, CompactStatement, DisputeStatement, EncodeAs,
+	InvalidDisputeStatementKind, SessionIndex, SigningContext, UncheckedSigned,
+	ValidDisputeStatementKind, ValidatorId, ValidatorIndex, ValidatorSignature,
 };
 
 /// `DisputeMessage` and related types.
@@ -207,8 +207,8 @@ impl SignedDisputeStatement {
 
 	/// Sign this statement with the given keystore and key. Pass `valid = true` to
 	/// indicate validity of the candidate, and `valid = false` to indicate invalidity.
-	pub async fn sign_explicit(
-		keystore: &SyncCryptoStorePtr,
+	pub fn sign_explicit(
+		keystore: &KeystorePtr,
 		valid: bool,
 		candidate_hash: CandidateHash,
 		session_index: SessionIndex,
@@ -221,27 +221,16 @@ impl SignedDisputeStatement {
 		};
 
 		let data = dispute_statement.payload_data(candidate_hash, session_index);
-		let signature = CryptoStore::sign_with(
-			&**keystore,
-			ValidatorId::ID,
-			&validator_public.clone().into(),
-			&data,
-		)
-		.await?;
-
-		let signature = match signature {
-			Some(sig) =>
-				sig.try_into().map_err(|_| KeystoreError::KeyNotSupported(ValidatorId::ID))?,
-			None => return Ok(None),
-		};
-
-		Ok(Some(Self {
-			dispute_statement,
-			candidate_hash,
-			validator_public,
-			validator_signature: signature,
-			session_index,
-		}))
+		let signature = keystore
+			.sr25519_sign(ValidatorId::ID, validator_public.as_ref(), &data)?
+			.map(|sig| Self {
+				dispute_statement,
+				candidate_hash,
+				validator_public,
+				validator_signature: sig.into(),
+				session_index,
+			});
+		Ok(signature)
 	}
 
 	/// Access the underlying dispute statement
@@ -281,19 +270,23 @@ impl SignedDisputeStatement {
 	/// along with the signing context.
 	///
 	/// This does signature checks again with the data provided.
-	pub fn from_backing_statement(
-		backing_statement: &UncheckedSignedFullStatement,
+	pub fn from_backing_statement<T>(
+		backing_statement: &UncheckedSigned<T, CompactStatement>,
 		signing_context: SigningContext,
 		validator_public: ValidatorId,
-	) -> Result<Self, ()> {
-		let (statement_kind, candidate_hash) = match backing_statement.unchecked_payload() {
-			Statement::Seconded(candidate) => (
+	) -> Result<Self, ()>
+	where
+		for<'a> &'a T: Into<CompactStatement>,
+		T: EncodeAs<CompactStatement>,
+	{
+		let (statement_kind, candidate_hash) = match backing_statement.unchecked_payload().into() {
+			CompactStatement::Seconded(candidate_hash) => (
 				ValidDisputeStatementKind::BackingSeconded(signing_context.parent_hash),
-				candidate.hash(),
+				candidate_hash,
 			),
-			Statement::Valid(candidate_hash) => (
+			CompactStatement::Valid(candidate_hash) => (
 				ValidDisputeStatementKind::BackingValid(signing_context.parent_hash),
-				*candidate_hash,
+				candidate_hash,
 			),
 		};
 

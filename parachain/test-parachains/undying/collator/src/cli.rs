@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 //! Polkadot CLI library.
 
 use clap::Parser;
-use sc_cli::{RuntimeVersion, SubstrateCli};
+use sc_cli::SubstrateCli;
 
 /// Sub-commands supported by the collator.
 #[derive(Debug, Parser)]
@@ -126,11 +126,5 @@ impl SubstrateCli for Cli {
 				Box::new(polkadot_service::RococoChainSpec::from_json_file(path)?)
 			},
 		})
-	}
-
-	fn native_runtime_version(
-		_spec: &Box<dyn polkadot_service::ChainSpec>,
-	) -> &'static RuntimeVersion {
-		&polkadot_service::rococo_runtime::VERSION
 	}
 }

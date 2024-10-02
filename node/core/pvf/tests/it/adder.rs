@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -39,6 +39,7 @@ async fn execute_good_block_on_parent() {
 				relay_parent_number: 1,
 				relay_parent_storage_root: Default::default(),
 			},
+			Default::default(),
 		)
 		.await
 		.unwrap();
@@ -52,14 +53,14 @@ async fn execute_good_block_on_parent() {
 
 #[tokio::test]
 async fn execute_good_chain_on_parent() {
-	let mut number = 0;
 	let mut parent_hash = [0; 32];
 	let mut last_state = 0;
 
 	let host = TestHost::new();
 
-	for add in 0..10 {
-		let parent_head = HeadData { number, parent_hash, post_state: hash_state(last_state) };
+	for (number, add) in (0..10).enumerate() {
+		let parent_head =
+			HeadData { number: number as u64, parent_hash, post_state: hash_state(last_state) };
 
 		let block_data = BlockData { state: last_state, add };
 
@@ -72,17 +73,17 @@ async fn execute_good_chain_on_parent() {
 					relay_parent_number: number as RelayChainBlockNumber + 1,
 					relay_parent_storage_root: Default::default(),
 				},
+				Default::default(),
 			)
 			.await
 			.unwrap();
 
 		let new_head = HeadData::decode(&mut &ret.head_data.0[..]).unwrap();
 
-		assert_eq!(new_head.number, number + 1);
+		assert_eq!(new_head.number, number as u64 + 1);
 		assert_eq!(new_head.parent_hash, parent_head.hash());
 		assert_eq!(new_head.post_state, hash_state(last_state + add));
 
-		number += 1;
 		parent_hash = new_head.hash();
 		last_state += add;
 	}
@@ -108,6 +109,7 @@ async fn execute_bad_block_on_parent() {
 				relay_parent_number: 1,
 				relay_parent_storage_root: Default::default(),
 			},
+			Default::default(),
 		)
 		.await
 		.unwrap_err();
@@ -129,6 +131,7 @@ async fn stress_spawn() {
 					relay_parent_number: 1,
 					relay_parent_storage_root: Default::default(),
 				},
+				Default::default(),
 			)
 			.await
 			.unwrap();

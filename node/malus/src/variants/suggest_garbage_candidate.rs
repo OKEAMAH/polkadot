@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -33,7 +33,8 @@ use polkadot_cli::{
 };
 use polkadot_node_core_candidate_validation::find_validation_data;
 use polkadot_node_primitives::{AvailableData, BlockData, PoV};
-use polkadot_primitives::CandidateDescriptor;
+use polkadot_node_subsystem_types::DefaultSubsystemClient;
+use polkadot_primitives::{CandidateDescriptor, CandidateReceipt};
 
 use polkadot_node_subsystem_util::request_validators;
 use sp_core::traits::SpawnNamed;
@@ -53,7 +54,6 @@ use crate::{
 // Import extra types relevant to the particular
 // subsystem.
 use polkadot_node_subsystem::{messages::CandidateBackingMessage, SpawnGlue};
-use polkadot_primitives::CandidateReceipt;
 
 use std::sync::Arc;
 
@@ -79,7 +79,13 @@ where
 	) -> Option<FromOrchestra<Self::Message>> {
 		match msg {
 			FromOrchestra::Communication {
-				msg: CandidateBackingMessage::Second(relay_parent, ref candidate, ref _pov),
+				msg:
+					CandidateBackingMessage::Second(
+						relay_parent,
+						ref candidate,
+						ref _validation_data,
+						ref _pov,
+					),
 			} => {
 				gum::debug!(
 					target: MALUS,
@@ -88,17 +94,18 @@ where
 					"Received request to second candidate",
 				);
 
-				// Need to draw value from Bernoulli distribution with given probability of success defined by the clap parameter.
-				// Note that clap parameter must be f64 since this is expected by the Bernoulli::new() function.
-				// It must be converted from u8, due to the lack of support for the .range() call on u64 in the clap crate.
+				// Need to draw value from Bernoulli distribution with given probability of success
+				// defined by the clap parameter. Note that clap parameter must be f64 since this is
+				// expected by the Bernoulli::new() function. It must be converted from u8, due to
+				// the lack of support for the .range() call on u64 in the clap crate.
 				let distribution = Bernoulli::new(self.percentage / 100.0)
 					.expect("Invalid probability! Percentage must be in range [0..=100].");
 
-				// Draw a random boolean from the Bernoulli distribution with probability of true equal to `p`.
-				// We use `rand::thread_rng` as the source of randomness.
+				// Draw a random boolean from the Bernoulli distribution with probability of true
+				// equal to `p`. We use `rand::thread_rng` as the source of randomness.
 				let generate_malicious_candidate = distribution.sample(&mut rand::thread_rng());
 
-				if generate_malicious_candidate == true {
+				if generate_malicious_candidate {
 					gum::debug!(target: MALUS, "😈 Suggesting malicious candidate.",);
 
 					let pov = PoV { block_data: BlockData(MALICIOUS_POV.into()) };
@@ -123,17 +130,22 @@ where
 							{
 								Ok(Some((validation_data, validation_code))) => {
 									sender
-										.send((validation_data, validation_code, n_validators))
+										.send(Some((
+											validation_data,
+											validation_code,
+											n_validators,
+										)))
 										.expect("channel is still open");
 								},
 								_ => {
-									panic!("Unable to fetch validation data");
+									sender.send(None).expect("channel is still open");
 								},
 							}
 						}),
 					);
 
-					let (validation_data, validation_code, n_validators) = receiver.recv().unwrap();
+					let (validation_data, validation_code, n_validators) =
+						receiver.recv().unwrap()?;
 
 					let validation_data_hash = validation_data.hash();
 					let validation_code_hash = validation_code.hash();
@@ -150,8 +162,10 @@ where
 						"Fetched validation data."
 					);
 
-					let malicious_available_data =
-						AvailableData { pov: Arc::new(pov.clone()), validation_data };
+					let malicious_available_data = AvailableData {
+						pov: Arc::new(pov.clone()),
+						validation_data: validation_data.clone(),
+					};
 
 					let pov_hash = pov.hash();
 					let erasure_root = {
@@ -205,6 +219,7 @@ where
 						msg: CandidateBackingMessage::Second(
 							relay_parent,
 							malicious_candidate,
+							validation_data,
 							pov,
 						),
 					};
@@ -247,11 +262,14 @@ pub(crate) struct SuggestGarbageCandidates {
 }
 
 impl OverseerGen for SuggestGarbageCandidates {
-	fn generate<'a, Spawner, RuntimeClient>(
+	fn generate<Spawner, RuntimeClient>(
 		&self,
 		connector: OverseerConnector,
-		args: OverseerGenArgs<'a, Spawner, RuntimeClient>,
-	) -> Result<(Overseer<SpawnGlue<Spawner>, Arc<RuntimeClient>>, OverseerHandle), Error>
+		args: OverseerGenArgs<'_, Spawner, RuntimeClient>,
+	) -> Result<
+		(Overseer<SpawnGlue<Spawner>, Arc<DefaultSubsystemClient<RuntimeClient>>>, OverseerHandle),
+		Error,
+	>
 	where
 		RuntimeClient: 'static + ProvideRuntimeApi<Block> + HeaderBackend<Block> + AuxStore,
 		RuntimeClient::Api: ParachainHost<Block> + BabeApi<Block> + AuthorityDiscoveryApi<Block>,

@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -192,8 +192,8 @@ impl Batch {
 
 	/// Calculate when the next tick should happen.
 	///
-	/// This will usually return `now + BATCH_COLLECTING_INTERVAL`, except if the lifetime of this batch
-	/// would exceed `MAX_BATCH_LIFETIME`.
+	/// This will usually return `now + BATCH_COLLECTING_INTERVAL`, except if the lifetime of this
+	/// batch would exceed `MAX_BATCH_LIFETIME`.
 	///
 	/// # Arguments
 	///

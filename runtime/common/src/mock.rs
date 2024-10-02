@@ -1,4 +1,4 @@
-// Copyright 2019-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -21,14 +21,18 @@ use frame_support::{
 	dispatch::{DispatchError, DispatchResult},
 	weights::Weight,
 };
+use frame_system::pallet_prelude::BlockNumberFor;
 use parity_scale_codec::{Decode, Encode};
-use primitives::{HeadData, Id as ParaId, ValidationCode};
+use primitives::{HeadData, Id as ParaId, PvfCheckStatement, SessionIndex, ValidationCode};
+use runtime_parachains::paras;
+use sp_keyring::Sr25519Keyring;
 use sp_runtime::{traits::SaturatedConversion, Permill};
 use std::{cell::RefCell, collections::HashMap};
 
 thread_local! {
 	static OPERATIONS: RefCell<Vec<(ParaId, u32, bool)>> = RefCell::new(Vec::new());
 	static PARACHAINS: RefCell<Vec<ParaId>> = RefCell::new(Vec::new());
+	// On-demand parachains
 	static PARATHREADS: RefCell<Vec<ParaId>> = RefCell::new(Vec::new());
 	static LOCKS: RefCell<HashMap<ParaId, bool>> = RefCell::new(HashMap::new());
 	static MANAGERS: RefCell<HashMap<ParaId, Vec<u8>>> = RefCell::new(HashMap::new());
@@ -47,6 +51,7 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 		PARACHAINS.with(|x| x.borrow().clone())
 	}
 
+	// Is on-demand parachain
 	fn is_parathread(id: ParaId) -> bool {
 		PARATHREADS.with(|x| x.borrow().binary_search(&id).is_ok())
 	}
@@ -73,7 +78,7 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 				Err(_) => Ok(()),
 			}
 		})?;
-		// Should not be parathread, then make it.
+		// Should not be parathread (on-demand parachain), then make it.
 		PARATHREADS.with(|x| {
 			let mut parathreads = x.borrow_mut();
 			match parathreads.binary_search(&id) {
@@ -97,7 +102,7 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 				Err(_) => Ok(()),
 			}
 		})?;
-		// Remove from parathread.
+		// Remove from parathreads (on-demand parachains).
 		PARATHREADS.with(|x| {
 			let mut parathreads = x.borrow_mut();
 			match parathreads.binary_search(&id) {
@@ -112,6 +117,8 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 		Ok(())
 	}
 
+	/// If the ParaId corresponds to a parathread (on-demand parachain),
+	/// then upgrade it to a lease holding parachain
 	fn make_parachain(id: ParaId) -> DispatchResult {
 		PARATHREADS.with(|x| {
 			let mut parathreads = x.borrow_mut();
@@ -142,6 +149,9 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 		});
 		Ok(())
 	}
+
+	/// If the ParaId corresponds to a lease holding parachain, then downgrade it to a
+	/// parathread (on-demand parachain)
 	fn make_parathread(id: ParaId) -> DispatchResult {
 		PARACHAINS.with(|x| {
 			let mut parachains = x.borrow_mut();
@@ -190,7 +200,7 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 }
 
 impl<T: frame_system::Config> TestRegistrar<T> {
-	pub fn operations() -> Vec<(ParaId, T::BlockNumber, bool)> {
+	pub fn operations() -> Vec<(ParaId, BlockNumberFor<T>, bool)> {
 		OPERATIONS
 			.with(|x| x.borrow().iter().map(|(p, b, c)| (*p, (*b).into(), *c)).collect::<Vec<_>>())
 	}
@@ -230,4 +240,31 @@ impl frame_support::traits::EstimateNextSessionRotation<u32> for TestNextSession
 	fn estimate_next_session_rotation(_now: u32) -> (Option<u32>, Weight) {
 		(None, Weight::zero())
 	}
+}
+
+pub fn validators_public_keys(validators: &[Sr25519Keyring]) -> Vec<primitives::ValidatorId> {
+	validators.iter().map(|v| v.public().into()).collect()
+}
+
+pub fn conclude_pvf_checking<T: paras::Config>(
+	validation_code: &ValidationCode,
+	validators: &[Sr25519Keyring],
+	session_index: SessionIndex,
+) {
+	let num_required = primitives::supermajority_threshold(validators.len());
+	validators.iter().enumerate().take(num_required).for_each(|(idx, key)| {
+		let validator_index = idx as u32;
+		let statement = PvfCheckStatement {
+			accept: true,
+			subject: validation_code.hash(),
+			session_index,
+			validator_index: validator_index.into(),
+		};
+		let signature = key.sign(&statement.signing_payload());
+		let _ = paras::Pallet::<T>::include_pvf_check_statement(
+			frame_system::Origin::<T>::None.into(),
+			statement,
+			signature.into(),
+		);
+	});
 }

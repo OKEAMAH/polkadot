@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -20,11 +20,12 @@ use lru::LruCache;
 use sp_consensus_babe::Epoch;
 
 use polkadot_primitives::{
-	AuthorityDiscoveryId, BlockNumber, CandidateCommitments, CandidateEvent, CandidateHash,
-	CommittedCandidateReceipt, CoreState, DisputeState, GroupRotationInfo, Hash, Id as ParaId,
-	InboundDownwardMessage, InboundHrmpMessage, OccupiedCoreAssumption, PersistedValidationData,
-	PvfCheckStatement, ScrapedOnChainVotes, SessionIndex, SessionInfo, ValidationCode,
-	ValidationCodeHash, ValidatorId, ValidatorIndex, ValidatorSignature,
+	vstaging, AuthorityDiscoveryId, BlockNumber, CandidateCommitments, CandidateEvent,
+	CandidateHash, CommittedCandidateReceipt, CoreState, DisputeState, ExecutorParams,
+	GroupRotationInfo, Hash, Id as ParaId, InboundDownwardMessage, InboundHrmpMessage,
+	OccupiedCoreAssumption, PersistedValidationData, PvfCheckStatement, ScrapedOnChainVotes,
+	SessionIndex, SessionInfo, ValidationCode, ValidationCodeHash, ValidatorId, ValidatorIndex,
+	ValidatorSignature,
 };
 
 /// For consistency we have the same capacity for all caches. We use 128 as we'll only need that
@@ -51,6 +52,7 @@ pub(crate) struct RequestResultCache {
 	validation_code_by_hash: LruCache<ValidationCodeHash, Option<ValidationCode>>,
 	candidate_pending_availability: LruCache<(Hash, ParaId), Option<CommittedCandidateReceipt>>,
 	candidate_events: LruCache<Hash, Vec<CandidateEvent>>,
+	session_executor_params: LruCache<SessionIndex, Option<ExecutorParams>>,
 	session_info: LruCache<SessionIndex, SessionInfo>,
 	dmq_contents: LruCache<(Hash, ParaId), Vec<InboundDownwardMessage<BlockNumber>>>,
 	inbound_hrmp_channels_contents:
@@ -62,6 +64,13 @@ pub(crate) struct RequestResultCache {
 		LruCache<(Hash, ParaId, OccupiedCoreAssumption), Option<ValidationCodeHash>>,
 	version: LruCache<Hash, u32>,
 	disputes: LruCache<Hash, Vec<(SessionIndex, CandidateHash, DisputeState<BlockNumber>)>>,
+	unapplied_slashes:
+		LruCache<Hash, Vec<(SessionIndex, CandidateHash, vstaging::slashing::PendingSlashes)>>,
+	key_ownership_proof:
+		LruCache<(Hash, ValidatorId), Option<vstaging::slashing::OpaqueKeyOwnershipProof>>,
+
+	staging_para_backing_state: LruCache<(Hash, ParaId), Option<vstaging::BackingState>>,
+	staging_async_backing_params: LruCache<Hash, vstaging::AsyncBackingParams>,
 }
 
 impl Default for RequestResultCache {
@@ -79,6 +88,7 @@ impl Default for RequestResultCache {
 			validation_code_by_hash: LruCache::new(DEFAULT_CACHE_CAP),
 			candidate_pending_availability: LruCache::new(DEFAULT_CACHE_CAP),
 			candidate_events: LruCache::new(DEFAULT_CACHE_CAP),
+			session_executor_params: LruCache::new(DEFAULT_CACHE_CAP),
 			session_info: LruCache::new(DEFAULT_CACHE_CAP),
 			dmq_contents: LruCache::new(DEFAULT_CACHE_CAP),
 			inbound_hrmp_channels_contents: LruCache::new(DEFAULT_CACHE_CAP),
@@ -88,6 +98,11 @@ impl Default for RequestResultCache {
 			validation_code_hash: LruCache::new(DEFAULT_CACHE_CAP),
 			version: LruCache::new(DEFAULT_CACHE_CAP),
 			disputes: LruCache::new(DEFAULT_CACHE_CAP),
+			unapplied_slashes: LruCache::new(DEFAULT_CACHE_CAP),
+			key_ownership_proof: LruCache::new(DEFAULT_CACHE_CAP),
+
+			staging_para_backing_state: LruCache::new(DEFAULT_CACHE_CAP),
+			staging_async_backing_params: LruCache::new(DEFAULT_CACHE_CAP),
 		}
 	}
 }
@@ -263,6 +278,21 @@ impl RequestResultCache {
 		self.session_info.put(key, value);
 	}
 
+	pub(crate) fn session_executor_params(
+		&mut self,
+		session_index: SessionIndex,
+	) -> Option<&Option<ExecutorParams>> {
+		self.session_executor_params.get(&session_index)
+	}
+
+	pub(crate) fn cache_session_executor_params(
+		&mut self,
+		session_index: SessionIndex,
+		value: Option<ExecutorParams>,
+	) {
+		self.session_executor_params.put(session_index, value);
+	}
+
 	pub(crate) fn dmq_contents(
 		&mut self,
 		key: (Hash, ParaId),
@@ -368,6 +398,74 @@ impl RequestResultCache {
 	) {
 		self.disputes.put(relay_parent, value);
 	}
+
+	pub(crate) fn unapplied_slashes(
+		&mut self,
+		relay_parent: &Hash,
+	) -> Option<&Vec<(SessionIndex, CandidateHash, vstaging::slashing::PendingSlashes)>> {
+		self.unapplied_slashes.get(relay_parent)
+	}
+
+	pub(crate) fn cache_unapplied_slashes(
+		&mut self,
+		relay_parent: Hash,
+		value: Vec<(SessionIndex, CandidateHash, vstaging::slashing::PendingSlashes)>,
+	) {
+		self.unapplied_slashes.put(relay_parent, value);
+	}
+
+	pub(crate) fn key_ownership_proof(
+		&mut self,
+		key: (Hash, ValidatorId),
+	) -> Option<&Option<vstaging::slashing::OpaqueKeyOwnershipProof>> {
+		self.key_ownership_proof.get(&key)
+	}
+
+	pub(crate) fn cache_key_ownership_proof(
+		&mut self,
+		key: (Hash, ValidatorId),
+		value: Option<vstaging::slashing::OpaqueKeyOwnershipProof>,
+	) {
+		self.key_ownership_proof.put(key, value);
+	}
+
+	// This request is never cached, hence always returns `None`.
+	pub(crate) fn submit_report_dispute_lost(
+		&mut self,
+		_key: (Hash, vstaging::slashing::DisputeProof, vstaging::slashing::OpaqueKeyOwnershipProof),
+	) -> Option<&Option<()>> {
+		None
+	}
+
+	pub(crate) fn staging_para_backing_state(
+		&mut self,
+		key: (Hash, ParaId),
+	) -> Option<&Option<vstaging::BackingState>> {
+		self.staging_para_backing_state.get(&key)
+	}
+
+	pub(crate) fn cache_staging_para_backing_state(
+		&mut self,
+		key: (Hash, ParaId),
+		value: Option<vstaging::BackingState>,
+	) {
+		self.staging_para_backing_state.put(key, value);
+	}
+
+	pub(crate) fn staging_async_backing_params(
+		&mut self,
+		key: &Hash,
+	) -> Option<&vstaging::AsyncBackingParams> {
+		self.staging_async_backing_params.get(key)
+	}
+
+	pub(crate) fn cache_staging_async_backing_params(
+		&mut self,
+		key: Hash,
+		value: vstaging::AsyncBackingParams,
+	) {
+		self.staging_async_backing_params.put(key, value);
+	}
 }
 
 pub(crate) enum RequestResult {
@@ -389,6 +487,7 @@ pub(crate) enum RequestResult {
 	ValidationCodeByHash(Hash, ValidationCodeHash, Option<ValidationCode>),
 	CandidatePendingAvailability(Hash, ParaId, Option<CommittedCandidateReceipt>),
 	CandidateEvents(Hash, Vec<CandidateEvent>),
+	SessionExecutorParams(Hash, SessionIndex, Option<ExecutorParams>),
 	SessionInfo(Hash, SessionIndex, Option<SessionInfo>),
 	DmqContents(Hash, ParaId, Vec<InboundDownwardMessage<BlockNumber>>),
 	InboundHrmpChannelsContents(
@@ -404,4 +503,16 @@ pub(crate) enum RequestResult {
 	ValidationCodeHash(Hash, ParaId, OccupiedCoreAssumption, Option<ValidationCodeHash>),
 	Version(Hash, u32),
 	Disputes(Hash, Vec<(SessionIndex, CandidateHash, DisputeState<BlockNumber>)>),
+	UnappliedSlashes(Hash, Vec<(SessionIndex, CandidateHash, vstaging::slashing::PendingSlashes)>),
+	KeyOwnershipProof(Hash, ValidatorId, Option<vstaging::slashing::OpaqueKeyOwnershipProof>),
+	// This is a request with side-effects.
+	SubmitReportDisputeLost(
+		Hash,
+		vstaging::slashing::DisputeProof,
+		vstaging::slashing::OpaqueKeyOwnershipProof,
+		Option<()>,
+	),
+
+	StagingParaBackingState(Hash, ParaId, Option<vstaging::BackingState>),
+	StagingAsyncBackingParams(Hash, vstaging::AsyncBackingParams),
 }
